@@ -1,7 +1,0 @@
-cffi
-pyobjc-framework-Quartz
-pyobjc-framework-Cocoa
-pyobjc-framework-ApplicationServices
-
-[dev]
-pytest
