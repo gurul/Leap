@@ -31,9 +31,6 @@ def main(argv=None) -> int:
     ap.add_argument("--clutch-deg", type=float, default=None,
                     help="how far the palm may tilt and still hold the clutch "
                          "(default 30). Raise it if the cursor will not move")
-    ap.add_argument("--clutch-deg", type=float, default=None,
-                    help="how far the palm may tilt and still hold the clutch "
-                         "(default 30). Raise it if the cursor will not move")
     ap.add_argument("--gain", type=float, default=1.0,
                     help="sensitivity multiplier; 2 = twice as fast, 0.5 = half")
     ap.add_argument("--point", choices=("index", "knuckles", "palm"),
