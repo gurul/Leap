@@ -91,6 +91,34 @@ class IntentEvent:
             self.data = {}
 
 
+class Debounce:
+    """Hysteresis for a DISCRETE signal, where Schmitt thresholds do not apply.
+
+    Finger count is an integer, so there is no band to sit inside — the guard has
+    to be time: a new value must persist for `hold` before it is believed. Without
+    it, one dropped frame of finger tracking flips the whole interaction state.
+    """
+
+    def __init__(self, initial, hold: float = 0.08):
+        self.value = initial
+        self.hold = hold
+        self._candidate = initial
+        self._since: Optional[float] = None
+
+    def update(self, value, now: float):
+        """Returns the new value on a confirmed change, else None."""
+        if value == self.value:
+            self._candidate, self._since = value, None
+            return None
+        if value != self._candidate:
+            self._candidate, self._since = value, now
+            return None
+        if self._since is None or now - self._since < self.hold:
+            return None
+        self.value, self._since = value, None
+        return value
+
+
 class Schmitt:
     """Two-threshold latch with a minimum dwell time.
 
@@ -203,6 +231,25 @@ class Config:
     grab_off: float = 0.35
     grab_dwell: float = 0.06
 
+    # The vocabulary is a monotonic ladder on EXTENDED FINGER COUNT.
+    #
+    #   0 fingers (fist)  -> grab: button down, cursor still moves (drag)
+    #   1 finger  (point) -> cursor moves, no button
+    #   2+ fingers        -> mouse LIFTED: cursor parked, reposition freely
+    #
+    # Why this and not pinch: pinch is model-INFERRED precisely where the thumb and
+    # index occlude each other, which is the moment it must be exact. Measured on
+    # this corpus, a deliberate pinch never produced a distinct finger state at all
+    # — it read as 3 extended, indistinguishable from a partly-open hand. Finger
+    # count separates perfectly on the same data: fist 100% at 0, two-finger 100%
+    # at 2, open and roaming 100% at 5.
+    #
+    # It is also one signal for the whole vocabulary, so the states cannot collide
+    # the way pose-based scroll collided with pose-based pointing.
+    clutch_mode: str = "fingers"    # "fingers" | "palm"
+    lift_at_fingers: int = 2        # this many extended = mouse lifted
+    finger_hold: float = 0.08       # debounce; ~9 frames at 110fps
+
     # Clutch = palm rotation, the ratchet that makes relative pointing possible.
     #
     # Palm-down (normal within 30 deg of straight down) is the neutral hand-on-desk
@@ -273,6 +320,7 @@ class GestureEngine:
         self._last_swipe = float("-inf")
         self._now = 0.0
         self.last_clutch_angle: Optional[float] = None
+        self.fingers = Debounce(5, self.cfg.finger_hold)
         self._scroll_anchor: Optional[float] = None
         self._scroll_emitted_at = 0.0
         self._subscribers: list[Callable[[IntentEvent], None]] = []
@@ -344,7 +392,10 @@ class GestureEngine:
         # independent of every finger, so clicking never breaks it.
         angle = palm_angle_degrees(frame, self.clutch_ref)
         self.last_clutch_angle = angle
-        if self.cfg.clutch_enabled:
+
+        if self.cfg.clutch_mode == "fingers":
+            self._update_finger_ladder(frame, now)
+        elif self.cfg.clutch_enabled:
             edge = self.clutch.update(angle, now)
             if edge is True:
                 self._emit(Intent.CLUTCH_DOWN, frame)
@@ -357,6 +408,10 @@ class GestureEngine:
         if self.clutch.state:
             self._emit(Intent.POINT_MOVE, frame,
                        settle=self._settle_factor(frame))
+
+        if self.cfg.clutch_mode == "fingers":
+            self._maybe_scroll(frame)
+            return                      # the ladder already drove grab and clutch
 
         # Buttons only exist while the clutch is held. Releasing the clutch is the
         # equivalent of lifting a mouse — pressing its button mid-air does nothing.
@@ -386,6 +441,34 @@ class GestureEngine:
                 self._emit(Intent.GRAB_UP, frame)
 
         self._maybe_scroll(frame)
+
+    def _update_finger_ladder(self, frame: HandFrame, now: float) -> None:
+        """One signal drives clutch and grab, so they cannot contradict."""
+        self.fingers.update(frame.extended_count, now)
+        count = self.fingers.value
+
+        lifted = count >= self.cfg.lift_at_fingers
+        if lifted and self.clutch.state:
+            if self.grab.force_off():
+                self._emit(Intent.GRAB_UP, frame)
+            self.clutch.state = False
+            self._emit(Intent.CLUTCH_UP, frame)
+        elif not lifted and not self.clutch.state:
+            self.clutch.state = True
+            self._emit(Intent.CLUTCH_DOWN, frame)
+
+        if not self.clutch.state:
+            return
+
+        # A fist is the button. grab_strength was >0.5 on 100% of fist frames and
+        # 0% of every other pose, so it is the most reliable signal available here.
+        fisted = count == 0 and frame.grab_strength >= self.cfg.grab_on
+        if fisted and not self.grab.state:
+            self.grab.state = True
+            self._emit(Intent.GRAB_DOWN, frame)
+        elif not fisted and self.grab.state:
+            self.grab.state = False
+            self._emit(Intent.GRAB_UP, frame)
 
     def _settle_factor(self, frame: HandFrame) -> float:
         """1.0 = move freely, 0.0 = frozen. Ramps as a pinch closes."""

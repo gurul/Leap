@@ -86,20 +86,20 @@ def test_schmitt_dwell_suppresses_a_transient():
 # --- engagement -------------------------------------------------------------
 
 def test_engages_above_threshold_and_disengages_below():
-    engine = GestureEngine(Config(plane="xz", engage_dwell=0.0))
+    engine = GestureEngine(Config(plane="xz", clutch_mode="palm", engage_dwell=0.0))
     seen = drive(engine, [frame(palm=Vec3(0, 150, 0)),
                           frame(palm=Vec3(0, 40, 0))])
     assert seen == [Intent.ENGAGE, Intent.DISENGAGE]
 
 
 def test_resting_hand_never_engages():
-    engine = GestureEngine(Config(plane="xz", engage_dwell=0.0))
+    engine = GestureEngine(Config(plane="xz", clutch_mode="palm", engage_dwell=0.0))
     assert drive(engine, [frame(palm=Vec3(0, 30, 0))] * 5) == []
 
 
 def test_no_intents_emitted_while_disengaged():
     """A pinch below the engage height must not click anything."""
-    engine = GestureEngine(Config(plane="xz", engage_dwell=0.0))
+    engine = GestureEngine(Config(plane="xz", clutch_mode="palm", engage_dwell=0.0))
     seen = drive(engine, [frame(palm=Vec3(0, 30, 0), pinch_distance=10.0)] * 3)
     assert seen == []
 
@@ -113,7 +113,7 @@ def test_tracking_loss_releases_a_held_button():
     carries clutch events too, and pinning their exact positions would make every
     future vocabulary change look like a safety regression.
     """
-    engine = GestureEngine(Config(plane="xz", engage_dwell=0.0, pinch_dwell=0.0, clutch_dwell=0.0))
+    engine = GestureEngine(Config(plane="xz", clutch_mode="palm", engage_dwell=0.0, pinch_dwell=0.0, clutch_dwell=0.0))
     seen = drive(engine, [frame(), frame(pinch_distance=10.0), None])
     assert Intent.SELECT_DOWN in seen and Intent.SELECT_UP in seen
     assert seen.index(Intent.SELECT_UP) > seen.index(Intent.SELECT_DOWN)
@@ -121,7 +121,7 @@ def test_tracking_loss_releases_a_held_button():
 
 
 def test_dropping_below_engage_height_releases_a_held_button():
-    engine = GestureEngine(Config(plane="xz", engage_dwell=0.0, pinch_dwell=0.0, clutch_dwell=0.0))
+    engine = GestureEngine(Config(plane="xz", clutch_mode="palm", engage_dwell=0.0, pinch_dwell=0.0, clutch_dwell=0.0))
     seen = drive(engine, [frame(), frame(pinch_distance=10.0),
                           frame(palm=Vec3(0, 40, 0), pinch_distance=10.0)])
     assert seen[-1] is Intent.DISENGAGE
@@ -131,7 +131,7 @@ def test_dropping_below_engage_height_releases_a_held_button():
 
 def test_select_up_precedes_disengage():
     """Order matters: the button must come up while the pointer is still driven."""
-    engine = GestureEngine(Config(plane="xz", engage_dwell=0.0, pinch_dwell=0.0, clutch_dwell=0.0))
+    engine = GestureEngine(Config(plane="xz", clutch_mode="palm", engage_dwell=0.0, pinch_dwell=0.0, clutch_dwell=0.0))
     seen = drive(engine, [frame(), frame(pinch_distance=10.0), None])
     assert seen.index(Intent.SELECT_UP) < seen.index(Intent.DISENGAGE)
 
@@ -140,7 +140,7 @@ def test_select_up_precedes_disengage():
 
 def test_fist_reads_as_grab_not_pinch():
     """A closed fist collapses pinch_distance too. It must not fire SELECT."""
-    engine = GestureEngine(Config(plane="xz", engage_dwell=0.0, pinch_dwell=0.0, grab_dwell=0.0, clutch_dwell=0.0))
+    engine = GestureEngine(Config(plane="xz", clutch_mode="palm", engage_dwell=0.0, pinch_dwell=0.0, grab_dwell=0.0, clutch_dwell=0.0))
     seen = drive(engine, [frame(), frame(pinch_distance=8.0, grab_strength=0.95,
                                          extended=(False,) * 5)])
     assert Intent.SELECT_DOWN not in seen
@@ -151,7 +151,7 @@ def test_fast_motion_never_fires_a_swipe():
     """Swipes are cut: the motion carries the hand out of the tracking volume,
     so the gesture destroys the tracking it depends on. A live session fired
     swipe.right and swipe.down unintentionally."""
-    engine = GestureEngine(Config(plane="xz", engage_dwell=0.0))
+    engine = GestureEngine(Config(plane="xz", clutch_mode="palm", engage_dwell=0.0))
     fast = frame(palm_velocity=Vec3(900.0, 0.0, 0.0))
     seen = drive(engine, [frame(), fast, fast, fast])
     assert not any(str(i).startswith("Intent.SWIPE") for i in seen)
@@ -169,7 +169,7 @@ def test_palm_down_is_zero_degrees():
 
 
 def test_clutch_engages_palm_down_and_releases_on_rotation():
-    engine = GestureEngine(Config(plane="xz", engage_dwell=0.0, clutch_dwell=0.0))
+    engine = GestureEngine(Config(plane="xz", clutch_mode="palm", engage_dwell=0.0, clutch_dwell=0.0))
     seen = drive(engine, [frame(palm_normal=PALM_DOWN),
                           frame(palm_normal=PALM_SIDE)])
     assert Intent.CLUTCH_DOWN in seen and Intent.CLUTCH_UP in seen
@@ -177,7 +177,7 @@ def test_clutch_engages_palm_down_and_releases_on_rotation():
 
 def test_pointer_does_not_move_without_the_clutch():
     """The ratchet: rotate the palm away and the cursor parks."""
-    engine = GestureEngine(Config(plane="xz", engage_dwell=0.0, clutch_dwell=0.0))
+    engine = GestureEngine(Config(plane="xz", clutch_mode="palm", engage_dwell=0.0, clutch_dwell=0.0))
     seen = []
     engine.subscribe(lambda e: seen.append(e.intent))
     for _ in range(5):
@@ -188,7 +188,7 @@ def test_pointer_does_not_move_without_the_clutch():
 def test_clicking_does_not_break_the_clutch():
     """Digit-disjoint by construction — a clutch that shares fingers with the
     click gets broken by every click it is meant to survive."""
-    engine = GestureEngine(Config(plane="xz", engage_dwell=0.0, clutch_dwell=0.0,
+    engine = GestureEngine(Config(plane="xz", clutch_mode="palm", engage_dwell=0.0, clutch_dwell=0.0,
                                   pinch_dwell=0.0))
     seen = drive(engine, [frame(palm_normal=PALM_DOWN),
                           frame(palm_normal=PALM_DOWN, pinch_distance=10.0),
@@ -198,7 +198,7 @@ def test_clicking_does_not_break_the_clutch():
 
 
 def test_tracking_loss_releases_the_clutch():
-    engine = GestureEngine(Config(plane="xz", engage_dwell=0.0, clutch_dwell=0.0))
+    engine = GestureEngine(Config(plane="xz", clutch_mode="palm", engage_dwell=0.0, clutch_dwell=0.0))
     seen = drive(engine, [frame(palm_normal=PALM_DOWN), None])
     assert seen.index(Intent.CLUTCH_UP) < seen.index(Intent.DISENGAGE)
 
@@ -209,12 +209,12 @@ def test_scroll_requires_a_fist():
     just from pointing. Grab is the one channel that separates cleanly."""
     cfg = dict(engage_dwell=0.0, clutch_dwell=0.0, grab_dwell=0.0)
 
-    engine = GestureEngine(Config(plane="xz", **cfg))
+    engine = GestureEngine(Config(plane="xz", clutch_mode="palm", **cfg))
     pointing = frame(palm_velocity=Vec3(0.0, 0.0, 50.0),
                      extended=(False, True, True, False, False))
     assert Intent.SCROLL not in drive(engine, [frame(), pointing])
 
-    engine = GestureEngine(Config(plane="xz", scroll_interval=0.0, **cfg))
+    engine = GestureEngine(Config(plane="xz", clutch_mode="palm", scroll_interval=0.0, **cfg))
     fist = lambda z: frame(palm=Vec3(0.0, 150.0, z), grab_strength=0.95,
                            extended=(False,) * 5)
     # Position control: the fist must TRAVEL, not merely be held.
@@ -224,7 +224,7 @@ def test_scroll_requires_a_fist():
 def test_a_held_still_fist_does_not_scroll():
     """The runaway: rate control kept scrolling for as long as the fist was held,
     measured at ~7700 px/sec. Position control stops when the hand stops."""
-    engine = GestureEngine(Config(plane="xz", engage_dwell=0.0, clutch_dwell=0.0,
+    engine = GestureEngine(Config(plane="xz", clutch_mode="palm", engage_dwell=0.0, clutch_dwell=0.0,
                                   grab_dwell=0.0, scroll_interval=0.0))
     still = frame(palm=Vec3(0.0, 150.0, 0.0), grab_strength=0.95,
                   extended=(False,) * 5)
@@ -233,7 +233,7 @@ def test_a_held_still_fist_does_not_scroll():
 
 def test_scroll_is_bounded_by_hand_travel():
     """Total scroll must be proportional to distance moved, not to time held."""
-    engine = GestureEngine(Config(plane="xz", engage_dwell=0.0, clutch_dwell=0.0,
+    engine = GestureEngine(Config(plane="xz", clutch_mode="palm", engage_dwell=0.0, clutch_dwell=0.0,
                                   grab_dwell=0.0, scroll_interval=0.0))
     seen = []
     engine.subscribe(lambda e: seen.append(e))
@@ -249,7 +249,7 @@ def test_scroll_is_bounded_by_hand_travel():
 def test_a_fist_cannot_also_latch_a_click():
     """A fist collapses pinch_distance to ~15mm. The live log shows grab.down then
     select.down with no release, leaving the button held through 400+ scrolls."""
-    engine = GestureEngine(Config(plane="xz", engage_dwell=0.0, clutch_dwell=0.0,
+    engine = GestureEngine(Config(plane="xz", clutch_mode="palm", engage_dwell=0.0, clutch_dwell=0.0,
                                   grab_dwell=0.0, pinch_dwell=0.0))
     fist = frame(grab_strength=0.95, pinch_distance=15.0, extended=(False,) * 5)
     seen = drive(engine, [frame(), fist, fist, fist])
@@ -260,7 +260,7 @@ def test_a_fist_cannot_also_latch_a_click():
 def test_clicks_are_gated_on_the_clutch():
     """Releasing the clutch is lifting the mouse; its button does nothing mid-air.
     A live session fired select.down/up after clutch.up while repositioning."""
-    engine = GestureEngine(Config(plane="xz", engage_dwell=0.0, clutch_dwell=0.0, pinch_dwell=0.0))
+    engine = GestureEngine(Config(plane="xz", clutch_mode="palm", engage_dwell=0.0, clutch_dwell=0.0, pinch_dwell=0.0))
     parked_and_pinching = frame(palm_normal=Vec3(1.0, 0.0, 0.0), pinch_distance=10.0)
     seen = drive(engine, [frame(), parked_and_pinching, parked_and_pinching])
     assert Intent.SELECT_DOWN not in seen
@@ -277,15 +277,15 @@ def test_clutch_reference_follows_the_plane():
     upright = frame(palm_normal=PALM_FORWARD, palm=Vec3(0, 150, 0))
     flat = frame(palm_normal=PALM_DOWN, palm=Vec3(0, 150, 0))
 
-    xy = GestureEngine(Config(plane="xy", engage_dwell=0.0, clutch_dwell=0.0))
+    xy = GestureEngine(Config(plane="xy", clutch_mode="palm", engage_dwell=0.0, clutch_dwell=0.0))
     assert Intent.CLUTCH_DOWN in drive(xy, [upright, upright])
 
-    xz = GestureEngine(Config(plane="xz", engage_dwell=0.0, clutch_dwell=0.0))
+    xz = GestureEngine(Config(plane="xz", clutch_mode="palm", engage_dwell=0.0, clutch_dwell=0.0))
     assert Intent.CLUTCH_DOWN in drive(xz, [flat, flat])
 
 
 def test_a_flat_palm_does_not_clutch_in_upright_mode():
-    xy = GestureEngine(Config(plane="xy", engage_dwell=0.0, clutch_dwell=0.0))
+    xy = GestureEngine(Config(plane="xy", clutch_mode="palm", engage_dwell=0.0, clutch_dwell=0.0))
     flat = frame(palm_normal=PALM_DOWN, palm=Vec3(0, 150, 0))
     assert Intent.CLUTCH_DOWN not in drive(xy, [flat, flat])
 
@@ -294,10 +294,10 @@ def test_upright_mode_drops_the_height_floor():
     """Height is the control axis in xy, so a meaningful floor would disengage the
     user for the crime of moving the cursor downward."""
     low = frame(palm_normal=PALM_FORWARD, palm=Vec3(0, 60, 0))
-    xy = GestureEngine(Config(plane="xy", engage_dwell=0.0, clutch_dwell=0.0))
+    xy = GestureEngine(Config(plane="xy", clutch_mode="palm", engage_dwell=0.0, clutch_dwell=0.0))
     assert Intent.ENGAGE in drive(xy, [low])
 
-    xz = GestureEngine(Config(plane="xz", engage_dwell=0.0, clutch_dwell=0.0))
+    xz = GestureEngine(Config(plane="xz", clutch_mode="palm", engage_dwell=0.0, clutch_dwell=0.0))
     assert Intent.ENGAGE not in drive(xz, [frame(palm_normal=PALM_DOWN,
                                                  palm=Vec3(0, 60, 0))])
 
@@ -308,7 +308,7 @@ def test_cursor_freezes_as_a_click_forms():
     """Hand pointing fails by missing, not by misfiring. Pinching curls the index
     — the tracked point — so the last millimetres of a click drag the cursor off
     target. Freeze progressively instead."""
-    engine = GestureEngine(Config(plane="xz", engage_dwell=0.0, clutch_dwell=0.0))
+    engine = GestureEngine(Config(plane="xz", clutch_mode="palm", engage_dwell=0.0, clutch_dwell=0.0))
     seen = []
     engine.subscribe(lambda e: seen.append(e))
     for d in (80.0, 50.0, 40.0, 36.0):
@@ -319,9 +319,85 @@ def test_cursor_freezes_as_a_click_forms():
 
 
 def test_an_open_hand_moves_at_full_speed():
-    engine = GestureEngine(Config(plane="xz", engage_dwell=0.0, clutch_dwell=0.0))
+    engine = GestureEngine(Config(plane="xz", clutch_mode="palm", engage_dwell=0.0, clutch_dwell=0.0))
     seen = []
     engine.subscribe(lambda e: seen.append(e))
     engine.on_snapshot(Snapshot(right=frame(pinch_distance=80.0)))
     moves = [e for e in seen if e.intent is Intent.POINT_MOVE]
     assert moves and moves[-1].data["settle"] == 1.0
+
+
+# --- finger ladder: 0 = grab, 1 = point, 2+ = lifted -------------------------
+
+def ladder(engine, counts):
+    """Drive the engine through a sequence of extended-finger counts."""
+    seen = []
+    engine.subscribe(lambda e: seen.append(e.intent))
+    t = 0
+    for n in counts:
+        ext = tuple(i < n for i in range(5))
+        for _ in range(14):            # hold long enough to clear the debounce
+            t += 9000
+            engine.on_snapshot(Snapshot(right=frame(
+                timestamp=t, extended=ext,
+                grab_strength=0.95 if n == 0 else 0.0)))
+    return [i for i in seen if i is not Intent.POINT_MOVE]
+
+
+def cfg_fingers(**kw):
+    return Config(plane="xz", clutch_mode="fingers", engage_dwell=0.0, **kw)
+
+
+def test_two_or_more_fingers_lifts_the_mouse():
+    seen = ladder(GestureEngine(cfg_fingers()), [1, 3])
+    assert seen[-1] is Intent.CLUTCH_UP
+
+
+def test_one_finger_engages_the_cursor():
+    seen = ladder(GestureEngine(cfg_fingers()), [3, 1])
+    assert Intent.CLUTCH_DOWN in seen
+
+
+def test_fist_grabs_while_still_engaged():
+    """A fist is the button, and dragging must keep working — so a fist must NOT
+    lift the mouse."""
+    seen = ladder(GestureEngine(cfg_fingers()), [1, 0])
+    assert Intent.GRAB_DOWN in seen
+    assert Intent.CLUTCH_UP not in seen
+
+
+def test_lifting_releases_a_held_grab():
+    """Opening the hand mid-drag must drop the button before parking."""
+    seen = ladder(GestureEngine(cfg_fingers()), [0, 4])
+    assert seen.index(Intent.GRAB_UP) < seen.index(Intent.CLUTCH_UP)
+
+
+def test_pinch_never_clicks_in_finger_mode():
+    """Pinch is model-inferred exactly where thumb and index occlude. On this
+    corpus a deliberate pinch read as 3 extended fingers — indistinguishable from
+    a partly open hand — so it drives nothing."""
+    engine = GestureEngine(cfg_fingers())
+    seen = []
+    engine.subscribe(lambda e: seen.append(e.intent))
+    t = 0
+    for _ in range(30):
+        t += 9000
+        engine.on_snapshot(Snapshot(right=frame(
+            timestamp=t, pinch_distance=8.0,
+            extended=(False, False, True, True, True))))
+    assert Intent.SELECT_DOWN not in seen
+
+
+def test_a_single_dropped_frame_does_not_flip_state():
+    """Finger count is discrete, so hysteresis has to be time. One bad frame of
+    finger tracking must not lift the mouse mid-gesture."""
+    engine = GestureEngine(cfg_fingers())
+    seen = []
+    engine.subscribe(lambda e: seen.append(e.intent))
+    t = 0
+    for i in range(40):
+        t += 9000
+        n = 4 if i == 20 else 1        # one spurious open-hand frame
+        engine.on_snapshot(Snapshot(right=frame(
+            timestamp=t, extended=tuple(k < n for k in range(5)))))
+    assert Intent.CLUTCH_UP not in seen

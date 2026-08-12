@@ -191,3 +191,42 @@ def test_xz_ignores_hand_height():
     before = (driver.x, driver.y)
     drive(driver, [frame(0, 150, 0, 0), frame(0, 220, 0, 100_000)])
     assert (driver.x, driver.y) == before
+
+
+# --- edge constraint ---------------------------------------------------------
+
+def at(x, z=0.0, y=150.0):
+    return frame(x, y, z, 0)
+
+
+def test_cursor_moves_freely_in_the_reliable_core():
+    driver, _ = make()
+    assert driver._edge_factor(at(0)) == 1.0
+    assert driver._edge_factor(at(120)) == 1.0
+
+
+def test_motion_is_damped_toward_the_edge_of_the_cone():
+    """LMC1 palm error rises from ~8mm centrally to RMS >20mm at the extremes, so
+    raw motion out there is largely noise. At high gain that noise is what throws
+    the cursor across the screen and 'beyond the plane'."""
+    driver, _ = make()
+    factors = [driver._edge_factor(at(x)) for x in (120, 160, 200, 260)]
+    assert factors == sorted(factors, reverse=True)
+    assert factors[-1] < 0.2
+
+
+def test_motion_stops_completely_past_the_usable_cone():
+    driver, _ = make()
+    assert driver._edge_factor(at(400)) == 0.0
+
+
+def test_edge_damping_limits_runaway_travel():
+    """The end-to-end property: a hand sweeping far out of the cone must not keep
+    dragging the cursor at full gain."""
+    near, far = make()[0], make()[0]
+    for driver, xs in ((near, range(0, 60)), (far, range(200, 260))):
+        frames = [frame(x * 2.0, 150, 0, i * 9000, vx=400.0)
+                  for i, x in enumerate(xs)]
+        drive(driver, frames)
+    assert abs(far.x - 756.0) < abs(near.x - 756.0), \
+        "edge travel should move the cursor less than core travel"

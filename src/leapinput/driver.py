@@ -98,6 +98,14 @@ class Mapping:
     # rigid alternative, or move the click to a grab which leaves the index alone.
     tracking_point: str = "index"
 
+    # Edge guard. Tracking degrades toward the edge of the cone — LMC1 palm error
+    # rises from ~8mm centrally to RMS >20mm at the extremes — so raw motion out
+    # there is mostly noise, and at high gain that noise becomes cursor jumps and
+    # the "goes beyond the plane" behaviour. Damp toward the edge instead of
+    # trusting it: full speed inside edge_ok_deg, fading to zero by edge_max_deg.
+    edge_ok_deg: float = 40.0
+    edge_max_deg: float = 62.0
+
     scroll_gain: float = 1.0
 
 
@@ -138,6 +146,16 @@ class DirectDriver:
         t = 0.0 if speed <= lo else 1.0 if speed >= hi else (speed - lo) / (hi - lo)
         base = self.map.gain_min + t * (self.map.gain_max - self.map.gain_min)
         return base * self.map.gain_scale
+
+    def _edge_factor(self, frame: HandFrame) -> float:
+        """1.0 in the reliable core, fading to 0.0 at the edge of the cone."""
+        ecc = frame.eccentricity
+        ok, cap = self.map.edge_ok_deg, self.map.edge_max_deg
+        if ecc <= ok:
+            return 1.0
+        if ecc >= cap:
+            return 0.0
+        return (cap - ecc) / (cap - ok)
 
     def on_intent(self, event: IntentEvent) -> None:
         handler = getattr(self, f"_on_{event.intent.name.lower()}", None)
@@ -189,6 +207,7 @@ class DirectDriver:
         # Freeze progressively as a click forms, so the pinch cannot drag the
         # cursor off the target it was aimed at.
         gain *= event.data.get("settle", 1.0)
+        gain *= self._edge_factor(frame)
         if gain == 0.0:
             return
         self.x = max(self.min_x, min(self.max_x - 1.0, self.x + dx_mm * gain))
@@ -218,6 +237,16 @@ class ShortcutDriver:
 
     def __init__(self, backend: Backend):
         self.backend = backend
+
+    def _edge_factor(self, frame: HandFrame) -> float:
+        """1.0 in the reliable core, fading to 0.0 at the edge of the cone."""
+        ecc = frame.eccentricity
+        ok, cap = self.map.edge_ok_deg, self.map.edge_max_deg
+        if ecc <= ok:
+            return 1.0
+        if ecc >= cap:
+            return 0.0
+        return (cap - ecc) / (cap - ok)
 
     def on_intent(self, event: IntentEvent) -> None:
         return None

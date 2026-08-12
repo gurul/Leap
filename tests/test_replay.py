@@ -42,7 +42,7 @@ def fired():
     rows = [json.loads(line) for line in SESSION.open()]
     out: dict[str, dict[str, int]] = {}
     # The recorded corpus is hand-flat-over-device, i.e. the xz plane.
-    engine = GestureEngine(Config(plane="xz"))
+    engine = GestureEngine(Config(plane="xz", clutch_mode="palm"))
     step = {"now": None}
 
     def record(event):
@@ -105,3 +105,53 @@ def test_static_poses_are_quiet(fired):
             if intent == Intent.SCROLL.value:
                 continue        # scroll is continuous by design while grabbing
             assert n <= 4, f"{step} emitted {intent} {n}x — threshold chatter"
+
+
+# --- the finger ladder, against the real corpus ------------------------------
+
+@pytest.fixture(scope="module")
+def ladder_fired():
+    rows = [json.loads(line) for line in SESSION.open()]
+    out: dict[str, dict[str, int]] = {}
+    engine = GestureEngine(Config(plane="xz", clutch_mode="fingers"))
+    step = {"now": None}
+
+    def record(event):
+        bucket = out.setdefault(step["now"], {})
+        bucket[event.intent.value] = bucket.get(event.intent.value, 0) + 1
+
+    engine.subscribe(record)
+    for row in rows:
+        step["now"] = row["step"]
+        engine.on_snapshot(Snapshot(right=rehydrate(row)))
+    return out
+
+
+def test_real_fist_frames_grab(ladder_fired):
+    """444 frames of a real fist, 100% of them at 0 extended fingers."""
+    assert Intent.GRAB_DOWN.value in discrete(ladder_fired, "fist")
+
+
+def test_real_open_hand_frames_lift_the_mouse(ladder_fired):
+    """Open hand and roaming were 100% at 5 extended — unambiguously lifted, so
+    the cursor must be parked and no button may be held."""
+    for step in ("open", "roam"):
+        assert Intent.GRAB_DOWN.value not in discrete(ladder_fired, step)
+        assert ladder_fired.get(step, {}).get(Intent.POINT_MOVE.value, 0) < 20
+
+
+def test_real_two_finger_frames_lift_the_mouse(ladder_fired):
+    """554 frames at exactly 2 extended — the lift threshold.
+
+    A handful of moves survive the debounce window (~9 frames at 110fps) before
+    the lift is confirmed. That is the hysteresis working, not a leak: the bound
+    is what matters, so assert the cursor stops rather than that it never moved.
+    """
+    step = ladder_fired.get("two_finger", {})
+    assert step.get(Intent.CLUTCH_UP.value, 0) >= 1
+    assert step.get(Intent.POINT_MOVE.value, 0) < 20, "cursor kept moving while lifted"
+
+
+def test_real_pinch_frames_never_click(ladder_fired):
+    """A deliberate pinch reads as 3 extended fingers on this hardware."""
+    assert Intent.SELECT_DOWN.value not in discrete(ladder_fired, "pinch")
