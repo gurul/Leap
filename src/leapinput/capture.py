@@ -60,6 +60,25 @@ class HandFrame:
     def extended_count(self) -> int:
         return sum(self.extended)
 
+    def track_point(self, kind: str) -> Vec3:
+        """The point the cursor follows.
+
+        "index"    — index fingertip. What people expect from pointing, and the
+                     most precise: the fingertip travels further than the palm for
+                     the same wrist motion, so small aims are easier to express.
+                     Costs noise (it is the end of the longest kinematic chain)
+                     and it MOVES WHEN YOU PINCH, since pinching curls the index
+                     toward the thumb.
+        "knuckles" — mean of the index..pinky MCP joints. Rigid through any finger
+                     pose, so a pinch cannot drag the cursor. Less expressive.
+        "palm"     — raw palm centroid. Drifts as fingers curl; kept for comparison.
+        """
+        if kind == "index" and len(self.fingertips) > 1:
+            return self.fingertips[1]
+        if kind == "palm":
+            return self.position
+        return self.center
+
     @property
     def center(self) -> Vec3:
         """Rigid palm centre — the knuckle line, not `palm.position`.

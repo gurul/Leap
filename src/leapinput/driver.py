@@ -48,15 +48,21 @@ class Mapping:
     # motion gets sub-pixel precision; a fast flick crosses the display in ~50mm.
     # Never 1:1 — that is what forces the big arm movements this design exists to
     # avoid. Seeds, to be refit against a Fitts-law harness.
-    # Lowered hard after live use: 1->30 px/mm was hyper-responsive, turning a
-    # 50mm hand movement into a full-screen sweep and making anything smaller than
-    # a button unhittable. 0.25->5 gives ~1:4 at slow speed (fine positioning) and
-    # still crosses the 1512px display in ~300mm of fast travel.
-    gain_min: float = 0.25
-    gain_max: float = 5.0
+    # Tuned by use, in both directions. 1->30 px/mm was hyper-responsive (a 50mm
+    # movement swept the whole screen); 0.25->5 was then too slow. 0.5->10 sits
+    # between them: still ~1:2 at slow speed for fine aiming, crossing the 1512px
+    # display in ~150mm of fast travel. Note the index fingertip also raises
+    # effective sensitivity for free, since the tip travels further than the palm
+    # for the same wrist rotation.
+    gain_min: float = 0.5
+    gain_max: float = 10.0
     speed_lo: float = 30.0       # mm/s at or below which gain_min applies
-    speed_hi: float = 500.0      # mm/s at or above which gain_max applies
-    deadzone_mm: float = 0.15    # below this per-frame delta, don't move at all
+    speed_hi: float = 450.0      # mm/s at or above which gain_max applies
+    deadzone_mm: float = 0.12    # below this per-frame delta, don't move at all
+
+    # Scales both gain ends together, so --gain retunes overall sensitivity
+    # without disturbing the slow/fast ratio that makes fine aiming possible.
+    gain_scale: float = 1.0
 
     # Axis direction. Leap desktop mode is +x right, +y up, +z TOWARD the user, and
     # CG screen space is +y DOWN, so the raw signs already line up: push the hand
@@ -70,6 +76,16 @@ class Mapping:
     # settled by trying it rather than by reasoning about sign conventions.
     invert_x: bool = False
     invert_z: bool = False
+
+    # Which point the cursor follows: "index" | "knuckles" | "palm".
+    #
+    # The index fingertip is the natural pointer and the most expressive — it
+    # travels further than the palm for the same wrist rotation. The tradeoff is
+    # real and worth knowing: pinching curls the index toward the thumb, so the
+    # tracked point moves during a click. The 1 euro filter and the click's own
+    # dwell absorb some of it; if clicks land off-target, "knuckles" is the
+    # rigid alternative, or move the click to a grab which leaves the index alone.
+    tracking_point: str = "index"
 
     scroll_gain: float = 1.0
 
@@ -109,7 +125,8 @@ class DirectDriver:
     def _gain(self, speed: float) -> float:
         lo, hi = self.map.speed_lo, self.map.speed_hi
         t = 0.0 if speed <= lo else 1.0 if speed >= hi else (speed - lo) / (hi - lo)
-        return self.map.gain_min + t * (self.map.gain_max - self.map.gain_min)
+        base = self.map.gain_min + t * (self.map.gain_max - self.map.gain_min)
+        return base * self.map.gain_scale
 
     def on_intent(self, event: IntentEvent) -> None:
         handler = getattr(self, f"_on_{event.intent.name.lower()}", None)
@@ -133,9 +150,7 @@ class DirectDriver:
 
     def _on_point_move(self, event: IntentEvent) -> None:
         frame = event.frame
-        # Rigid knuckle centre, not palm centroid — the centroid drifts as fingers
-        # curl, so a pinch would nudge the cursor off target mid-click.
-        p = frame.center
+        p = frame.track_point(self.map.tracking_point)
         fx, _fy, fz = self._filter(p.x, p.y, p.z, frame.timestamp / 1e6)
 
         if self._last is None:              # first frame of this clutch: anchor only

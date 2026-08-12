@@ -25,6 +25,12 @@ def main(argv=None) -> int:
                     help="flip left/right (try it if the cursor mirrors you)")
     ap.add_argument("--invert-z", action="store_true",
                     help="flip up/down (depends on which way the device faces)")
+    ap.add_argument("--gain", type=float, default=1.0,
+                    help="sensitivity multiplier; 2 = twice as fast, 0.5 = half")
+    ap.add_argument("--point", choices=("index", "knuckles", "palm"),
+                    default="index",
+                    help="what the cursor follows. index is most expressive but "
+                         "moves when you pinch; knuckles is rigid through a click")
     ap.add_argument("--duration", type=float, default=120.0,
                     help="stop automatically after N seconds (0 = no limit). A "
                          "runaway that owns the cursor is hard to quit by hand, so "
@@ -43,7 +49,9 @@ def main(argv=None) -> int:
 
     engine = GestureEngine(Config(hand=args.hand))
     direct = DirectDriver(backend, Mapping(invert_x=args.invert_x,
-                                          invert_z=args.invert_z))
+                                          invert_z=args.invert_z,
+                                          gain_scale=args.gain,
+                                          tracking_point=args.point))
     engine.subscribe(direct.on_intent)
     if args.shortcuts:
         engine.subscribe(ShortcutDriver(backend).on_intent)

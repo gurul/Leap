@@ -17,12 +17,17 @@ LAPTOP_PLUS_MONITOR = (-541.0, -1440.0, 2019.0, 982.0)
 
 
 def frame(x, y, z, t_us, vx=0.0, vz=0.0) -> HandFrame:
+    """A hand at (x,y,z). Fingertips and knuckles ride with it, so the frame is
+    valid for whichever tracking_point the driver is configured to follow."""
+    at = Vec3(x, y, z)
+    tips = tuple(Vec3(x + dx, y + 30.0, z - 60.0) for dx in (-20, -6, 4, 14, 24))
+    knuckles = tuple(Vec3(x + dx, y + 10.0, z) for dx in (-20, -7, 7, 20))
     return HandFrame(
         frame_id=1, timestamp=t_us, hand_id=1, side="Right", confidence=1.0,
-        palm=Vec3(x, y, z), palm_stable=ORIGIN, palm_velocity=Vec3(vx, 0.0, vz),
+        palm=at, palm_stable=ORIGIN, palm_velocity=Vec3(vx, 0.0, vz),
         palm_normal=Vec3(0.0, -1.0, 0.0), palm_direction=ORIGIN,
         pinch_strength=0.0, pinch_distance=80.0, grab_strength=0.0, grab_angle=0.0,
-        extended=(True,) * 5, fingertips=(ORIGIN,) * 5,
+        extended=(True,) * 5, fingertips=tips, knuckles=knuckles,
     )
 
 
@@ -109,3 +114,30 @@ def test_reclutching_does_not_teleport_the_cursor():
     driver.on_intent(IntentEvent(Intent.POINT_MOVE, 0.5, far))
 
     assert (driver.x, driver.y) == parked
+
+
+# --- tracking point ---------------------------------------------------------
+
+def test_index_fingertip_is_the_default_pointer():
+    assert Mapping().tracking_point == "index"
+
+
+def test_every_tracking_point_produces_motion():
+    """Each mode must actually follow the hand — a mis-wired selector that always
+    returned a constant would silently freeze the cursor."""
+    for kind in ("index", "knuckles", "palm"):
+        driver, _ = make(Mapping(tracking_point=kind))
+        start = driver.x
+        drive(driver, [frame(0, 150, 0, 0), frame(30, 150, 0, 100_000)])
+        assert driver.x > start, f"{kind} did not move the cursor"
+
+
+def test_knuckles_mode_ignores_finger_curl():
+    """The rigid alternative: same hand position, fingers curled to pinch."""
+    driver, _ = make(Mapping(tracking_point="knuckles"))
+    a = frame(0, 150, 0, 0)
+    b = frame(0, 150, 0, 100_000)
+    curled = HandFrame(**{**b.__dict__, "fingertips": tuple(
+        Vec3(t.x - 25.0, t.y - 20.0, t.z + 30.0) for t in b.fingertips)})
+    drive(driver, [a, curled])
+    assert (driver.x, driver.y) == (a and driver.x, driver.y)   # no jump
