@@ -164,8 +164,17 @@ class Config:
     clutch_dwell: float = 0.045     # ~5 frames at 110fps
     clutch_release_dwell: float = 0.072
 
-    # Scroll: two fingers extended, vertical palm motion.
+    # Scroll = FIST + move, not the old index+middle pose.
+    #
+    # That pose was index+middle extended with the rest curled — which is very
+    # nearly the natural pointing posture now that the index fingertip drives the
+    # cursor. A live session emitted 61 scroll events inside a single clutch just
+    # from pointing. Pointing and scrolling cannot be made digit-disjoint while the
+    # index is the pointer, so scroll moves to the one channel that is perfectly
+    # separable here: grab_strength was >0.5 on 100% of fist frames and 0% of every
+    # other pose. Grab the page and drag it.
     scroll_gain: float = 0.35
+    scroll_min_mm_s: float = 25.0   # ignore the tremor of simply holding a fist
 
 
 class GestureEngine:
@@ -209,11 +218,22 @@ class GestureEngine:
         for fn in self._subscribers:
             fn(event)
 
-    def _release_all(self, frame: Optional[HandFrame]) -> None:
+    def _release_buttons(self, frame: Optional[HandFrame]) -> None:
+        """Drop held buttons, leaving the clutch alone.
+
+        Kept separate from _release_all for a reason that cost a debugging cycle:
+        force_off() clears a Schmitt's pending-dwell timer, so calling it on the
+        clutch every un-clutched frame means the dwell can never accumulate and the
+        clutch can NEVER engage. Only reach for the clutch when the hand is
+        genuinely gone.
+        """
         if self.pinch.force_off():
             self._emit(Intent.SELECT_UP, frame)
         if self.grab.force_off():
             self._emit(Intent.GRAB_UP, frame)
+
+    def _release_all(self, frame: Optional[HandFrame]) -> None:
+        self._release_buttons(frame)
         if self.clutch.force_off():
             self._emit(Intent.CLUTCH_UP, frame)
 
@@ -250,6 +270,14 @@ class GestureEngine:
         if self.clutch.state:
             self._emit(Intent.POINT_MOVE, frame)
 
+        # Buttons only exist while the clutch is held. Releasing the clutch is the
+        # equivalent of lifting a mouse — pressing its button mid-air does nothing.
+        # A live session fired select.down/up after clutch.up while the hand was
+        # simply being repositioned.
+        if not self.clutch.state:
+            self._release_buttons(frame)
+            return
+
         # Pinch to select. Guarded on the index finger actually being involved:
         # a closed fist collapses pinch_distance too, and that should read as grab.
         if frame.grab_strength < self.cfg.grab_on:
@@ -269,11 +297,9 @@ class GestureEngine:
         self._maybe_scroll(frame)
 
     def _maybe_scroll(self, frame: HandFrame) -> None:
-        # Index + middle extended, others curled: a deliberate, distinctive pose.
-        if frame.extended[1] and frame.extended[2] and not any(
-            (frame.extended[0], frame.extended[3], frame.extended[4])
-        ):
-            dy = frame.palm_velocity.z * self.cfg.scroll_gain
-            if abs(dy) > 1.0:
-                self._emit(Intent.SCROLL, frame, dy=dy)
+        if not self.grab.state:
+            return
+        if abs(frame.palm_velocity.z) < self.cfg.scroll_min_mm_s:
+            return
+        self._emit(Intent.SCROLL, frame, dy=frame.palm_velocity.z * self.cfg.scroll_gain)
 

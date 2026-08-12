@@ -74,8 +74,8 @@ class Mapping:
     # rotation decides this, not the datasheet: turn it 180 degrees so the cable
     # faces you and z flips. Exposed as --invert-x / --invert-z so it can be
     # settled by trying it rather than by reasoning about sign conventions.
-    invert_x: bool = False
-    invert_z: bool = False
+    invert_x: bool = True       # confirmed by use 2026-08-12
+    invert_z: bool = False      # confirmed correct by use 2026-08-12
 
     # Which point the cursor follows: "index" | "knuckles" | "palm".
     #

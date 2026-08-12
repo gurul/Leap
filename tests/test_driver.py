@@ -44,6 +44,13 @@ def make(mapping=None, bounds=LAPTOP_PLUS_MONITOR):
 
 # --- inversion --------------------------------------------------------------
 
+def test_left_right_is_inverted_by_default():
+    """Confirmed by use on this desk 2026-08-12: without this the cursor mirrors
+    your hand horizontally."""
+    assert Mapping().invert_x is True
+    assert Mapping().invert_z is False
+
+
 def test_hand_toward_user_moves_cursor_down_by_default():
     """+z is toward the user; CG +y is down. Confirmed by use: pull the hand back
     and the cursor comes down the screen; push it away and it goes up."""
@@ -75,8 +82,9 @@ def test_cursor_can_reach_a_display_above_and_left_of_main():
     """The live bug: clamping to (0,0,w,h) traps the cursor on the main display,
     because a second monitor placed up-left has NEGATIVE CG coordinates."""
     driver, _ = make()
-    # Up-left = hand left (-x) and AWAY from the user (-z), with default axes.
-    frames = [frame(-i * 4.0, 150, -i * 4.0, i * 9000, vx=-500.0, vz=-500.0)
+    # Up-left with the shipped defaults (invert_x=True): hand RIGHT (+x) maps to
+    # cursor-left, and away from the user (-z) maps to cursor-up.
+    frames = [frame(i * 4.0, 150, -i * 4.0, i * 9000, vx=500.0, vz=-500.0)
               for i in range(60)]
     drive(driver, frames)
     assert driver.x < 0.0, "never crossed onto the left-hand display"
@@ -85,7 +93,7 @@ def test_cursor_can_reach_a_display_above_and_left_of_main():
 
 def test_cursor_is_clamped_to_the_union_not_the_main_screen():
     driver, _ = make()
-    frames = [frame(-i * 20.0, 150, -i * 20.0, i * 9000, vx=-900.0, vz=-900.0)
+    frames = [frame(i * 20.0, 150, -i * 20.0, i * 9000, vx=900.0, vz=-900.0)
               for i in range(200)]
     drive(driver, frames)
     assert driver.x >= -541.0 and driver.y >= -1440.0, "escaped the desktop union"
@@ -93,7 +101,7 @@ def test_cursor_is_clamped_to_the_union_not_the_main_screen():
 
 def test_single_display_still_clamps_at_zero():
     driver, _ = make(bounds=(0.0, 0.0, 1512.0, 982.0))
-    frames = [frame(-i * 20.0, 150, -i * 20.0, i * 9000, vx=-900.0, vz=-900.0)
+    frames = [frame(i * 20.0, 150, -i * 20.0, i * 9000, vx=900.0, vz=-900.0)
               for i in range(200)]
     drive(driver, frames)
     assert driver.x >= 0.0 and driver.y >= 0.0
@@ -129,7 +137,7 @@ def test_every_tracking_point_produces_motion():
         driver, _ = make(Mapping(tracking_point=kind))
         start = driver.x
         drive(driver, [frame(0, 150, 0, 0), frame(30, 150, 0, 100_000)])
-        assert driver.x > start, f"{kind} did not move the cursor"
+        assert driver.x != start, f"{kind} did not move the cursor"
 
 
 def test_knuckles_mode_ignores_finger_curl():
