@@ -54,7 +54,11 @@ class Mapping:
     # display in ~150mm of fast travel. Note the index fingertip also raises
     # effective sensitivity for free, since the tip travels further than the palm
     # for the same wrist rotation.
-    gain_min: float = 0.5
+    # Do not lower gain_min further: low control-display gain measurably HURTS
+    # pointing (more clutching, higher limb speeds), and pointer acceleration beats
+    # constant gain by 3.3-5.6%, most on small targets. The non-linear curve is the
+    # point; a low floor is not "precision", it is just slow.
+    gain_min: float = 0.9
     gain_max: float = 10.0
     speed_lo: float = 30.0       # mm/s at or below which gain_min applies
     speed_hi: float = 450.0      # mm/s at or above which gain_max applies
@@ -182,6 +186,11 @@ class DirectDriver:
 
         v = frame.palm_velocity
         gain = self._gain(math.hypot(v.x, v.y if self.map.plane == "xy" else v.z))
+        # Freeze progressively as a click forms, so the pinch cannot drag the
+        # cursor off the target it was aimed at.
+        gain *= event.data.get("settle", 1.0)
+        if gain == 0.0:
+            return
         self.x = max(self.min_x, min(self.max_x - 1.0, self.x + dx_mm * gain))
         self.y = max(self.min_y, min(self.max_y - 1.0, self.y + dz_mm * gain))
         self.backend.move(self.x, self.y)

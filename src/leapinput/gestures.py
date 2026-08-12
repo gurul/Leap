@@ -183,6 +183,20 @@ class Config:
     pinch_off_mm: float = 60.0
     pinch_dwell: float = 0.04
 
+    # Cursor stabilisation while a click is forming.
+    #
+    # Measured failure mode for HAND pointing is misses, not slips: 95.7% spatial
+    # targeting failures vs 4.3% unintended activation (arXiv 2603.15991). Midas
+    # touch is a gaze problem. So the payoff is in landing the click, not in more
+    # gating — and we know exactly why ours drift: pinching curls the index, which
+    # is the tracked point.
+    #
+    # Between these distances the click is "forming", and the cursor is
+    # progressively frozen so the last millimetres of the pinch cannot drag it off
+    # target. Mirrors TouchFree's growing click deadzone.
+    settle_start_mm: float = 55.0   # begin stabilising
+    settle_full_mm: float = 38.0    # fully frozen just before the click fires
+
     # Grab = fist. The cleanest signal on this hardware: grab_strength was >0.5 on
     # 100% of fist frames and 0% of every other pose. Effectively binary.
     grab_on: float = 0.75
@@ -341,7 +355,8 @@ class GestureEngine:
             self._emit(Intent.CLUTCH_DOWN, frame)
 
         if self.clutch.state:
-            self._emit(Intent.POINT_MOVE, frame)
+            self._emit(Intent.POINT_MOVE, frame,
+                       settle=self._settle_factor(frame))
 
         # Buttons only exist while the clutch is held. Releasing the clutch is the
         # equivalent of lifting a mouse — pressing its button mid-air does nothing.
@@ -371,6 +386,16 @@ class GestureEngine:
                 self._emit(Intent.GRAB_UP, frame)
 
         self._maybe_scroll(frame)
+
+    def _settle_factor(self, frame: HandFrame) -> float:
+        """1.0 = move freely, 0.0 = frozen. Ramps as a pinch closes."""
+        start, full = self.cfg.settle_start_mm, self.cfg.settle_full_mm
+        d = frame.pinch_distance
+        if d >= start:
+            return 1.0
+        if d <= full:
+            return 0.0
+        return (d - full) / (start - full)
 
     def _maybe_scroll(self, frame: HandFrame) -> None:
         if not self.grab.state:

@@ -300,3 +300,28 @@ def test_upright_mode_drops_the_height_floor():
     xz = GestureEngine(Config(plane="xz", engage_dwell=0.0, clutch_dwell=0.0))
     assert Intent.ENGAGE not in drive(xz, [frame(palm_normal=PALM_DOWN,
                                                  palm=Vec3(0, 60, 0))])
+
+
+# --- click stabilisation (arXiv 2603.15991: hand errors are 95.7% misses) -----
+
+def test_cursor_freezes_as_a_click_forms():
+    """Hand pointing fails by missing, not by misfiring. Pinching curls the index
+    — the tracked point — so the last millimetres of a click drag the cursor off
+    target. Freeze progressively instead."""
+    engine = GestureEngine(Config(plane="xz", engage_dwell=0.0, clutch_dwell=0.0))
+    seen = []
+    engine.subscribe(lambda e: seen.append(e))
+    for d in (80.0, 50.0, 40.0, 36.0):
+        engine.on_snapshot(Snapshot(right=frame(pinch_distance=d)))
+    settles = [e.data["settle"] for e in seen if e.intent is Intent.POINT_MOVE]
+    assert settles == sorted(settles, reverse=True), "must decrease monotonically"
+    assert settles[0] == 1.0 and settles[-1] == 0.0
+
+
+def test_an_open_hand_moves_at_full_speed():
+    engine = GestureEngine(Config(plane="xz", engage_dwell=0.0, clutch_dwell=0.0))
+    seen = []
+    engine.subscribe(lambda e: seen.append(e))
+    engine.on_snapshot(Snapshot(right=frame(pinch_distance=80.0)))
+    moves = [e for e in seen if e.intent is Intent.POINT_MOVE]
+    assert moves and moves[-1].data["settle"] == 1.0
