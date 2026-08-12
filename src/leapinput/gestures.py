@@ -144,13 +144,20 @@ class Config:
     # Which plane the hand works in. "xz" = flat over the device (top-down);
     # "xy" = upright, as if drawing on a vertical screen.
     #
-    # xz is the DEFAULT because it is the posture the sensor sees best: the device
-    # looks up from the desk, so a flat palm presents its full area while an
-    # upright hand is nearly edge-on. Making xy the default silently broke a
-    # working setup — held flat out of habit, the palm sits 90 deg off the
-    # palm-forward clutch reference, so the clutch never engages and the cursor
-    # never moves at all. xy stays available via --plane xy.
-    plane: str = "xz"
+    # xy is the default by request. It needs a DELIBERATE upright posture, palm
+    # facing the screen: held flat out of habit the palm sits 90 deg off the
+    # palm-forward clutch reference, the clutch never engages, and since the clutch
+    # gates all pointer motion the cursor does not move at all. That is what
+    # happened the first time this was defaulted.
+    #
+    # Two things make it workable rather than merely default. The clutch cone is
+    # wider here (see clutch_on_deg_xy): an upright hand's palm orientation varies
+    # more, and the sensor's normal estimate is noisier because the device looks UP
+    # from the desk and an upright hand is closer to edge-on. And the height floor
+    # drops, because height is the control axis in this plane.
+    #
+    # --plane xz returns to the flat top-down model, which the sensor tracks best.
+    plane: str = "xy"
 
     # Height is a SANITY FLOOR, not the engagement gate.
     #
@@ -194,6 +201,10 @@ class Config:
     # sensor produces palm-down.
     clutch_on_deg: float = 30.0
     clutch_off_deg: float = 45.0
+    # Wider in xy: an upright palm is closer to edge-on to a device that looks up,
+    # so its normal is noisier, and 30 deg proved too tight to hold.
+    clutch_on_deg_xy: float = 50.0
+    clutch_off_deg_xy: float = 70.0
     clutch_dwell: float = 0.045     # ~5 frames at 110fps
     clutch_release_dwell: float = 0.072
 
@@ -224,8 +235,10 @@ class GestureEngine:
         self.pinch = Schmitt(self.cfg.pinch_on_mm, self.cfg.pinch_off_mm, self.cfg.pinch_dwell)
         self.grab = Schmitt(self.cfg.grab_on, self.cfg.grab_off, self.cfg.grab_dwell)
         # on_at < off_at: a SMALL angle means palm-down means engaged.
-        self.clutch = Schmitt(self.cfg.clutch_on_deg, self.cfg.clutch_off_deg,
-                              self.cfg.clutch_dwell)
+        self.clutch = Schmitt(
+            self.cfg.clutch_on_deg_xy if xy else self.cfg.clutch_on_deg,
+            self.cfg.clutch_off_deg_xy if xy else self.cfg.clutch_off_deg,
+            self.cfg.clutch_dwell)
         # "no swipe has ever happened" — not 0.0, which reads as "a swipe just
         # happened at t=0" and silently suppresses every swipe until the refractory
         # elapses. Invisible against real sensor timestamps (large microsecond

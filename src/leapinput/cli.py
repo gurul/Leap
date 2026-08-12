@@ -25,7 +25,7 @@ def main(argv=None) -> int:
                     help="flip left/right (try it if the cursor mirrors you)")
     ap.add_argument("--invert-z", action="store_true",
                     help="flip up/down (depends on which way the device faces)")
-    ap.add_argument("--plane", choices=("xz", "xy"), default="xz",
+    ap.add_argument("--plane", choices=("xy", "xz"), default="xy",
                     help="xy: hand upright, drawing on a vertical plane. "
                          "xz: hand flat over the device, top-down")
     ap.add_argument("--clutch-deg", type=float, default=None,
@@ -57,6 +57,8 @@ def main(argv=None) -> int:
     if args.clutch_deg is not None:
         gesture_cfg.clutch_on_deg = args.clutch_deg
         gesture_cfg.clutch_off_deg = args.clutch_deg + 15.0
+        gesture_cfg.clutch_on_deg_xy = args.clutch_deg
+        gesture_cfg.clutch_off_deg_xy = args.clutch_deg + 15.0
     engine = GestureEngine(gesture_cfg)
     direct = DirectDriver(backend, Mapping(plane=args.plane,
                                           invert_x=args.invert_x,

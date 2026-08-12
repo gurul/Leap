@@ -153,11 +153,10 @@ def test_knuckles_mode_ignores_finger_curl():
 
 # --- the upright (xy) plane -------------------------------------------------
 
-def test_xz_is_the_default_plane():
-    """Making xy the default broke a working setup: held flat out of habit,
-    the palm is 90 deg off the palm-forward clutch reference, so the cursor
-    never moved at all."""
-    assert Mapping().plane == "xz"
+def test_xy_is_the_default_plane():
+    """Requires a deliberate upright posture — held flat, the palm is 90 deg off
+    the palm-forward clutch reference and nothing moves at all."""
+    assert Mapping().plane == "xy"
 
 
 def test_raising_the_hand_raises_the_cursor_in_xy():
