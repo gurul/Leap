@@ -21,6 +21,10 @@ def main(argv=None) -> int:
     ap.add_argument("--shortcuts", action="store_true",
                     help="also map swipes to Spaces / app switcher")
     ap.add_argument("--verbose", action="store_true", help="log pointer moves too")
+    ap.add_argument("--invert-x", action="store_true",
+                    help="flip left/right (try it if the cursor mirrors you)")
+    ap.add_argument("--invert-z", action="store_true",
+                    help="flip up/down (depends on which way the device faces)")
     ap.add_argument("--duration", type=float, default=120.0,
                     help="stop automatically after N seconds (0 = no limit). A "
                          "runaway that owns the cursor is hard to quit by hand, so "
@@ -38,7 +42,8 @@ def main(argv=None) -> int:
         if args.backend == "dry-run" else make_backend(args.backend)
 
     engine = GestureEngine(Config(hand=args.hand))
-    direct = DirectDriver(backend, Mapping())
+    direct = DirectDriver(backend, Mapping(invert_x=args.invert_x,
+                                          invert_z=args.invert_z))
     engine.subscribe(direct.on_intent)
     if args.shortcuts:
         engine.subscribe(ShortcutDriver(backend).on_intent)

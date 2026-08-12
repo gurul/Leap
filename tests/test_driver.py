@@ -39,14 +39,13 @@ def make(mapping=None, bounds=LAPTOP_PLUS_MONITOR):
 
 # --- inversion --------------------------------------------------------------
 
-def test_hand_toward_user_moves_cursor_up_by_default():
-    """+z is toward the user. invert_z=True is the measured-correct setting for
-    this desk, so pulling the hand back moves the cursor UP the screen and
-    pushing it away moves down — reach forward for the far monitor."""
+def test_hand_toward_user_moves_cursor_down_by_default():
+    """+z is toward the user; CG +y is down. Confirmed by use: pull the hand back
+    and the cursor comes down the screen; push it away and it goes up."""
     driver, _ = make()
     start = driver.y
     drive(driver, [frame(0, 150, 0, 0), frame(0, 150, 20, 100_000)])
-    assert driver.y < start
+    assert driver.y > start
 
 
 def test_inversion_is_configurable_per_axis():
@@ -71,8 +70,8 @@ def test_cursor_can_reach_a_display_above_and_left_of_main():
     """The live bug: clamping to (0,0,w,h) traps the cursor on the main display,
     because a second monitor placed up-left has NEGATIVE CG coordinates."""
     driver, _ = make()
-    # Up-left = hand left (-x) and TOWARD the user (+z), given invert_z.
-    frames = [frame(-i * 4.0, 150, i * 4.0, i * 9000, vx=-500.0, vz=500.0)
+    # Up-left = hand left (-x) and AWAY from the user (-z), with default axes.
+    frames = [frame(-i * 4.0, 150, -i * 4.0, i * 9000, vx=-500.0, vz=-500.0)
               for i in range(60)]
     drive(driver, frames)
     assert driver.x < 0.0, "never crossed onto the left-hand display"
@@ -81,7 +80,7 @@ def test_cursor_can_reach_a_display_above_and_left_of_main():
 
 def test_cursor_is_clamped_to_the_union_not_the_main_screen():
     driver, _ = make()
-    frames = [frame(-i * 20.0, 150, i * 20.0, i * 9000, vx=-900.0, vz=900.0)
+    frames = [frame(-i * 20.0, 150, -i * 20.0, i * 9000, vx=-900.0, vz=-900.0)
               for i in range(200)]
     drive(driver, frames)
     assert driver.x >= -541.0 and driver.y >= -1440.0, "escaped the desktop union"
@@ -89,7 +88,7 @@ def test_cursor_is_clamped_to_the_union_not_the_main_screen():
 
 def test_single_display_still_clamps_at_zero():
     driver, _ = make(bounds=(0.0, 0.0, 1512.0, 982.0))
-    frames = [frame(-i * 20.0, 150, i * 20.0, i * 9000, vx=-900.0, vz=900.0)
+    frames = [frame(-i * 20.0, 150, -i * 20.0, i * 9000, vx=-900.0, vz=-900.0)
               for i in range(200)]
     drive(driver, frames)
     assert driver.x >= 0.0 and driver.y >= 0.0

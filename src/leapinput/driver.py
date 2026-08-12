@@ -59,13 +59,17 @@ class Mapping:
     deadzone_mm: float = 0.15    # below this per-frame delta, don't move at all
 
     # Axis direction. Leap desktop mode is +x right, +y up, +z TOWARD the user, and
-    # CG screen space is +y DOWN. So hand-toward-you should read as cursor-down and
-    # the raw signs line up on paper — but the device's physical rotation decides
-    # it, not the datasheet. Rotate the controller 180 degrees (cable toward you
-    # rather than away) and z flips. These make it a config value instead of an
-    # argument: confirmed inverted in live use on this desk, 2026-08-12.
+    # CG screen space is +y DOWN, so the raw signs already line up: push the hand
+    # away and the cursor goes up. Confirmed correct in live use 2026-08-12 — an
+    # earlier invert_z=True default was my misreading of a vaguer bug report, and
+    # it made up/down wrong.
+    #
+    # Kept as config rather than hardcoded because the controller's physical
+    # rotation decides this, not the datasheet: turn it 180 degrees so the cable
+    # faces you and z flips. Exposed as --invert-x / --invert-z so it can be
+    # settled by trying it rather than by reasoning about sign conventions.
     invert_x: bool = False
-    invert_z: bool = True
+    invert_z: bool = False
 
     scroll_gain: float = 1.0
 
