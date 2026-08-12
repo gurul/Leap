@@ -4,6 +4,8 @@ The point of these is the failure modes that are miserable to debug by waving at
 sensor: chatter at a threshold, and state left held when tracking drops out.
 """
 
+import dataclasses
+
 import pytest
 
 from leapinput.capture import HandFrame, Snapshot, Vec3
@@ -12,10 +14,13 @@ from leapinput.gestures import Config, GestureEngine, Intent, Schmitt
 ORIGIN = Vec3(0.0, 0.0, 0.0)
 
 
+FRAME_US = 9_000          # ~110 fps, matching the real device
+
+
 def frame(**kw) -> HandFrame:
     base = dict(
         frame_id=1, timestamp=0, hand_id=1, side="Right", confidence=1.0,
-        palm=ORIGIN, palm_stable=Vec3(0.0, 150.0, 0.0), palm_velocity=ORIGIN,
+        palm=Vec3(0.0, 150.0, 0.0), palm_stable=ORIGIN, palm_velocity=ORIGIN,
         palm_normal=ORIGIN, palm_direction=ORIGIN,
         pinch_strength=0.0, pinch_distance=80.0,
         grab_strength=0.0, grab_angle=0.0,
@@ -26,10 +31,20 @@ def frame(**kw) -> HandFrame:
 
 
 def drive(engine: GestureEngine, frames) -> list[Intent]:
+    """Feed frames with advancing timestamps.
+
+    The engine clocks off the sensor's frame timestamps, so a fixture that stamps
+    every frame at t=0 freezes time and silently suppresses every dwell and
+    refractory window. Real frames always advance; the fixture must too.
+    """
     seen: list[Intent] = []
     engine.subscribe(lambda e: seen.append(e.intent))
-    for f in frames:
-        engine.on_snapshot(Snapshot(right=f) if f else Snapshot())
+    for i, f in enumerate(frames):
+        if f is None:
+            engine.on_snapshot(Snapshot())
+        else:
+            engine.on_snapshot(Snapshot(right=dataclasses.replace(
+                f, timestamp=f.timestamp + i * FRAME_US)))
     return [i for i in seen if i is not Intent.POINT_MOVE]
 
 
@@ -69,20 +84,20 @@ def test_schmitt_dwell_suppresses_a_transient():
 
 def test_engages_above_threshold_and_disengages_below():
     engine = GestureEngine(Config(engage_dwell=0.0))
-    seen = drive(engine, [frame(palm_stable=Vec3(0, 150, 0)),
-                          frame(palm_stable=Vec3(0, 40, 0))])
+    seen = drive(engine, [frame(palm=Vec3(0, 150, 0)),
+                          frame(palm=Vec3(0, 40, 0))])
     assert seen == [Intent.ENGAGE, Intent.DISENGAGE]
 
 
 def test_resting_hand_never_engages():
     engine = GestureEngine(Config(engage_dwell=0.0))
-    assert drive(engine, [frame(palm_stable=Vec3(0, 30, 0))] * 5) == []
+    assert drive(engine, [frame(palm=Vec3(0, 30, 0))] * 5) == []
 
 
 def test_no_intents_emitted_while_disengaged():
     """A pinch below the engage height must not click anything."""
     engine = GestureEngine(Config(engage_dwell=0.0))
-    seen = drive(engine, [frame(palm_stable=Vec3(0, 30, 0), pinch_distance=10.0)] * 3)
+    seen = drive(engine, [frame(palm=Vec3(0, 30, 0), pinch_distance=10.0)] * 3)
     assert seen == []
 
 
@@ -99,7 +114,7 @@ def test_tracking_loss_releases_a_held_button():
 def test_dropping_below_engage_height_releases_a_held_button():
     engine = GestureEngine(Config(engage_dwell=0.0, pinch_dwell=0.0))
     seen = drive(engine, [frame(), frame(pinch_distance=10.0),
-                          frame(palm_stable=Vec3(0, 40, 0), pinch_distance=10.0)])
+                          frame(palm=Vec3(0, 40, 0), pinch_distance=10.0)])
     assert seen[-2:] == [Intent.SELECT_UP, Intent.DISENGAGE]
 
 

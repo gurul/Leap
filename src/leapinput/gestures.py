@@ -95,27 +95,43 @@ class Schmitt:
 
 @dataclass
 class Config:
+    """Thresholds measured from 3639 frames of this user's hand on this v1
+    controller (docs/context/session.jsonl, 2026-08-12). Every value below cites
+    the separation it was derived from — do not "tidy" them without re-measuring.
+    """
+
     hand: str = "Right"
 
-    # Engagement volume. Below engage_y the hand is "resting" and controls nothing.
-    engage_y: float = 90.0          # mm above the device to take control
-    release_y: float = 55.0         # mm below which control is released
-    engage_dwell: float = 0.12      # s of sustained height before engaging
+    # Height is a SANITY FLOOR, not the engagement gate.
+    #
+    # Measured: hand resting on the desk produces NO TRACKING AT ALL (the rest step
+    # captured 12 stray transition frames out of 3639). Resting height 145-183mm and
+    # working height 137-242mm overlap completely, so height cannot separate the two.
+    # The real gate is hand presence, which the device gives for free and which no
+    # threshold can get wrong. This floor only rejects implausibly low readings —
+    # session y-minimum was 124mm, p2 was 131mm.
+    engage_y: float = 115.0
+    release_y: float = 100.0
+    engage_dwell: float = 0.08
 
-    # Select = thumb/index pinch. Distance in mm is more stable than pinch_strength
-    # on a v1 controller, which reports strength as a coarse, quantized curve.
-    pinch_on_mm: float = 22.0
-    pinch_off_mm: float = 38.0
+    # Select = thumb/index pinch, measured in mm rather than pinch_strength: on a v1
+    # controller the strength curve is coarse, but the distance separation is huge —
+    # pinched 17-18mm vs open 83-87mm, a 65mm gap. These sit well inside it.
+    pinch_on_mm: float = 35.0
+    pinch_off_mm: float = 60.0
     pinch_dwell: float = 0.04
 
-    # Grab = whole-hand fist.
-    grab_on: float = 0.85
-    grab_off: float = 0.55
+    # Grab = fist. The cleanest signal on this hardware: grab_strength was >0.5 on
+    # 100% of fist frames and 0% of every other pose. Effectively binary.
+    grab_on: float = 0.75
+    grab_off: float = 0.35
     grab_dwell: float = 0.06
 
-    # Swipes: peak palm speed with a refractory period so one flick fires once.
-    swipe_speed: float = 700.0      # mm/s
-    swipe_refractory: float = 0.6   # s
+    # Swipe = peak palm speed. Roaming tops out at 419 mm/s; a swipe peaks at
+    # 803 mm/s (p95). 600 sits in the 384 mm/s of headroom between them, so normal
+    # pointing cannot reach it. The refractory makes one flick fire once.
+    swipe_speed: float = 600.0
+    swipe_refractory: float = 0.6
 
     # Scroll: two fingers extended, vertical palm motion.
     scroll_gain: float = 0.35
@@ -129,14 +145,33 @@ class GestureEngine:
         self.engaged = Schmitt(self.cfg.engage_y, self.cfg.release_y, self.cfg.engage_dwell)
         self.pinch = Schmitt(self.cfg.pinch_on_mm, self.cfg.pinch_off_mm, self.cfg.pinch_dwell)
         self.grab = Schmitt(self.cfg.grab_on, self.cfg.grab_off, self.cfg.grab_dwell)
-        self._last_swipe = 0.0
+        # "no swipe has ever happened" — not 0.0, which reads as "a swipe just
+        # happened at t=0" and silently suppresses every swipe until the refractory
+        # elapses. Invisible against real sensor timestamps (large microsecond
+        # counts) but fatal on any timebase that starts near zero.
+        self._last_swipe = float("-inf")
+        self._now = 0.0
         self._subscribers: list[Callable[[IntentEvent], None]] = []
+
+    def _clock(self, frame: Optional[HandFrame]) -> float:
+        """Time comes from the sensor, not the wall.
+
+        Every frame carries the tracking service's own microsecond timestamp. Using
+        it means dwell and refractory windows measure when the motion happened rather
+        than when Python got around to the callback — so a GC pause or a slow
+        subscriber cannot stretch a dwell. It also makes the engine deterministic:
+        a recorded session replays to exactly the same intents at any speed, which
+        is how these thresholds are regression-tested.
+        """
+        if frame is not None:
+            self._now = frame.timestamp / 1e6
+        return self._now
 
     def subscribe(self, fn: Callable[[IntentEvent], None]) -> None:
         self._subscribers.append(fn)
 
     def _emit(self, intent: Intent, frame: Optional[HandFrame] = None, **data) -> None:
-        event = IntentEvent(intent, time.monotonic(), frame, data)
+        event = IntentEvent(intent, self._now, frame, data)
         for fn in self._subscribers:
             fn(event)
 
@@ -147,8 +182,8 @@ class GestureEngine:
             self._emit(Intent.GRAB_UP, frame)
 
     def on_snapshot(self, snap: Snapshot) -> None:
-        now = time.monotonic()
         frame = snap.get(self.cfg.hand)
+        now = self._clock(frame)
 
         # Tracking lost: release everything held, then disengage. Order matters —
         # a held button must come up before the pointer stops being driven.

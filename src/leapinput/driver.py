@@ -19,17 +19,30 @@ from .gestures import Intent, IntentEvent
 class Mapping:
     """The interaction box, in millimetres, in Leap device coordinates.
 
-    Sized deliberately small. A big box means big arm movements, and big arm movements
-    are what killed this input category — see docs/context/ergonomics. Small box plus
-    a wide gain is the same screen coverage for a fraction of the shoulder load.
+    MEASURED, not assumed — and the measurement overturned the obvious guess. Across
+    3639 frames (docs/context/session.jsonl) the reachable volume is a wide, shallow,
+    strongly right-shifted slab, not the symmetric box you would design from the
+    datasheet:
+
+        x   p2 -24 .. p98 +214   (median +42)   238mm wide
+        z   p2 +15 .. p98  +84   (median +45)    69mm deep
+
+    A symmetric +/-110 box would have been unusable: z never went negative at all in
+    the entire session, so the whole top half of the screen would have been physically
+    unreachable, and the left edge needs x=-110 when the hand never passed -97.
+
+    CAVEAT: z is under-sampled. The roam step spanned only 39mm at p5-p95 because the
+    hand mostly swept sideways. 69mm of depth mapped onto 982px is ~14 px/mm versus
+    ~6 px/mm horizontally, so vertical control is twice as twitchy as horizontal.
+    Re-capture a roam that deliberately explores near/far before trusting z.
     """
 
-    x_min: float = -110.0
-    x_max: float = 110.0
-    z_far: float = -100.0    # away from you -> top of screen
-    z_near: float = 100.0    # toward you   -> bottom of screen
+    x_min: float = -24.0
+    x_max: float = 214.0
+    z_far: float = 15.0      # away from you -> top of screen
+    z_near: float = 84.0     # toward you   -> bottom of screen
 
-    smoothing: float = 0.45  # EMA on top of Leap's stabilized position
+    smoothing: float = 0.45
     scroll_gain: float = 1.0
 
 

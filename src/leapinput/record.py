@@ -251,7 +251,7 @@ def analyze(path: str) -> int:
         if not rows:
             print(f"{step:<12} {0:>5}  (no frames)")
             continue
-        y, pd, gs = col(step, "palm_stable_y"), col(step, "pinch_distance"), col(step, "grab_strength")
+        y, pd, gs = col(step, "palm_y"), col(step, "pinch_distance"), col(step, "grab_strength")
         print(f"{step:<12} {len(rows):>5}  "
               f"{_pct(y,5):>6.0f} {statistics.median(y):>6.0f} {_pct(y,95):>6.0f}  "
               f"{_pct(pd,5):>5.0f} {statistics.median(pd):>5.0f} {_pct(pd,95):>5.0f}  "
@@ -259,8 +259,8 @@ def analyze(path: str) -> int:
     print("\n(columns show p5 / median / p95)\n")
 
     print("=== recommended thresholds ===")
-    rest_y = col("rest", "palm_stable_y")
-    hover_y = col("hover", "palm_stable_y") + col("roam", "palm_stable_y")
+    rest_y = col("rest", "palm_y")
+    hover_y = col("hover", "palm_y") + col("roam", "palm_y")
     if rest_y and hover_y:
         # Engage above where the hand rests, release below where it works.
         engage = (_pct(rest_y, 95) + _pct(hover_y, 5)) / 2
@@ -283,14 +283,21 @@ def analyze(path: str) -> int:
     swipe_v = [abs(r["palm_velocity_x"]) for r in by_step.get("swipe", [])]
     roam_v = [abs(r["palm_velocity_x"]) for r in by_step.get("roam", [])]
     if swipe_v and roam_v:
-        print(f"  swipe_speed   = {(_pct(swipe_v,75)+_pct(roam_v,99))/2:>6.0f}   "
-              f"(swipe p75 {_pct(swipe_v,75):.0f}, roam p99 {_pct(roam_v,99):.0f})")
-        if _pct(roam_v, 99) > _pct(swipe_v, 75):
-            print("    WARNING: roaming is as fast as swiping — swipes will misfire.")
+        # A swipe is a transient burst, so compare its PEAK against roaming's
+        # ceiling. Comparing medians or quartiles compares a burst's average to a
+        # sustained motion's average and spuriously reports overlap — that false
+        # alarm nearly got swipes cut on 2026-08-12.
+        peak, ceiling = _pct(swipe_v, 95), max(roam_v)
+        print(f"  swipe_speed   = {(peak + ceiling) / 2:>6.0f}   "
+              f"(swipe peak p95 {peak:.0f}, roam ceiling {ceiling:.0f})")
+        if ceiling >= peak:
+            print("    WARNING: roaming reaches swipe speed — swipes will misfire.")
+        else:
+            print(f"    headroom {peak - ceiling:.0f} mm/s between roam and swipe")
 
     # The interaction box should be what the hand actually reached, not a guess.
-    rx = col("roam", "palm_stable_x")
-    rz = col("roam", "palm_stable_z")
+    rx = col("roam", "palm_x")
+    rz = col("roam", "palm_z")
     if rx and rz:
         print(f"  Mapping x_min = {_pct(rx,5):>6.0f} , x_max = {_pct(rx,95):>6.0f}")
         print(f"  Mapping z_far = {_pct(rz,5):>6.0f} , z_near = {_pct(rz,95):>6.0f}")
