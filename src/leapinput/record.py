@@ -21,7 +21,7 @@ from collections import defaultdict
 from typing import Optional
 
 from .capture import HandFrame, LeapSource, Snapshot
-from .viz import BOLD, RESET, LivePanel, _safe
+from .viz import BOLD, DIM, GREEN, RED, RESET, LivePanel, _safe
 
 
 @dataclasses.dataclass
@@ -70,7 +70,67 @@ def _flatten(frame: HandFrame) -> dict:
     return d
 
 
-def capture(path: str, hand: str) -> int:
+def _await_pose(source: LeapSource, hand: str, step: Step, gate: str,
+                hold: float = 0.6, timeout: float = 45.0) -> bool:
+    """Block until the user is actually in the pose, then return.
+
+    This is what removes the whole class of bug that wrecked the first session.
+    A countdown makes the human race the protocol; waiting for the pose makes the
+    protocol wait for the human. The step cannot start early, so it cannot record
+    the previous pose.
+    """
+    if gate == "enter":
+        input("    press Enter when ready > ")
+        return True
+
+    if step.expect is None:                 # steps with no signature (rest) just pause
+        print("    ...", end="", flush=True)
+        time.sleep(2.0)
+        print(" go")
+        return True
+
+    desc, predicate = step.expect
+    deadline = time.monotonic() + timeout
+    steady_since: Optional[float] = None
+
+    while time.monotonic() < deadline:
+        frame = source.latest.get(hand)
+        ok = frame is not None and _safe(predicate, frame)
+        now = time.monotonic()
+        if ok:
+            steady_since = now if steady_since is None else steady_since
+            if now - steady_since >= hold:
+                print(f"\r    {GREEN}✓{RESET} {desc}"
+                      f"{' ' * 40}")
+                return True
+        else:
+            steady_since = None
+        held = 0.0 if steady_since is None else now - steady_since
+        print(f"\r    {_status_line(frame, desc, ok, held, hold)}",
+              end="", flush=True)
+        time.sleep(0.05)
+
+    print(f"\r    {RED}✗ TIMEOUT{RESET} waiting for {desc}{' ' * 30}")
+    return False
+
+
+def _status_line(frame: Optional[HandFrame], desc: str, ok: bool,
+                 held: float, hold: float) -> str:
+    """One line of live feedback. Compact enough to update in place without
+    fighting the scrolling step log, unlike the full panel."""
+    if frame is None:
+        return f"{RED}no hand{RESET}  waiting for: {desc}{' ' * 20}"
+    p = frame.position
+    bar = "▰" * int(held / hold * 6) + "▱" * (6 - int(held / hold * 6))
+    mark = f"{GREEN}✓{RESET}" if ok else f"{DIM}·{RESET}"
+    return (f"{mark} x{p.x:>+5.0f} y{p.y:>+5.0f} z{p.z:>+5.0f}  "
+            f"{DIM}pinch{RESET}{frame.pinch_distance:>3.0f} "
+            f"{DIM}grab{RESET}{frame.grab_strength:>4.2f} "
+            f"{DIM}ext{RESET}{sum(frame.extended)}  "
+            f"{bar} {desc}{' ' * 8}")
+
+
+def capture(path: str, hand: str, gate: str = "auto") -> int:
     rows: list[dict] = []
     frames: dict[str, list[HandFrame]] = {}
     current: Optional[str] = None
@@ -85,16 +145,25 @@ def capture(path: str, hand: str) -> int:
     source.subscribe(on_snapshot)
 
     print(f"Recording {hand.lower()} hand.")
-    print("Watch the panel. Get into the pose, wait for ✓ MATCH, then press Enter.\n")
+    if gate == "enter":
+        print("Get into each pose, wait for the green ✓ MATCH, then press Enter.\n")
+    else:
+        print("Just get into each pose and hold it. Recording starts by itself.\n")
     warnings: list[str] = []
 
     with source.open():
-        panel = LivePanel(source, hand).start()
+        panel = LivePanel(source, hand)
+        if gate == "enter":
+            panel.start()          # nothing scrolls while we block on input()
         try:
             for step in PROTOCOL:
                 panel.target = step.expect
                 print(f"\n  {BOLD}{step.instruction}{RESET}")
-                input("    press Enter when ready > ")
+
+                if not _await_pose(source, hand, step, gate):
+                    warnings.append(f"{step.label}: timed out waiting for the pose")
+                    print("    !! timed out waiting for the pose — skipping")
+                    continue
 
                 current = step.label
                 print(f"    recording {step.seconds:.0f}s ...", end="", flush=True)
@@ -234,10 +303,13 @@ def main(argv=None) -> int:
     cap = sub.add_parser("capture")
     cap.add_argument("-o", "--out", default="session.jsonl")
     cap.add_argument("--hand", choices=("Left", "Right"), default="Right")
+    cap.add_argument("--gate", choices=("auto", "enter"), default="auto",
+                     help="auto waits until you hold the pose; enter waits for a keypress")
     ana = sub.add_parser("analyze")
     ana.add_argument("path")
     args = ap.parse_args(argv)
-    return capture(args.out, args.hand) if args.cmd == "capture" else analyze(args.path)
+    return (capture(args.out, args.hand, args.gate) if args.cmd == "capture"
+            else analyze(args.path))
 
 
 if __name__ == "__main__":
