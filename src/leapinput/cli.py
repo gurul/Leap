@@ -25,9 +25,9 @@ def main(argv=None) -> int:
                     help="flip left/right (try it if the cursor mirrors you)")
     ap.add_argument("--invert-z", action="store_true",
                     help="flip up/down (depends on which way the device faces)")
-    ap.add_argument("--plane", choices=("xy", "xz"), default="xy",
-                    help="xy: hand upright, drawing on a vertical plane. "
-                         "xz: hand flat over the device, top-down")
+    ap.add_argument("--plane", choices=("xz", "xy"), default="xz",
+                    help="xz (default): desk plane — hand forward/back moves the "
+                         "cursor up/down. xy: hand height moves it up/down")
     ap.add_argument("--no-clutch", action="store_true",
                     help="pointer moves whenever a hand is tracked. Use this if "
                          "the cursor will not move at all; you lose the ratchet")

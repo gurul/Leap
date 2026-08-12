@@ -77,11 +77,12 @@ class Mapping:
     invert_x: bool = True       # confirmed by use 2026-08-12
     invert_z: bool = False      # applies to the vertical axis in both planes
 
-    # "xy" (default) = upright hand on a vertical plane; raise the hand and the
-    # cursor rises, hand depth is ignored. "xz" = flat over the device, top-down.
-    # Must match Config.plane, which also moves the clutch reference, the clutch
-    # cone width, and the engagement floor.
-    plane: str = "xy"
+    # "xz" (default, measured best) = the desk plane. Hand left/right drives the
+    # cursor horizontally; hand FORWARD/BACK drives it vertically. "xy" reads the
+    # vertical axis from hand height instead, for an upright posture.
+    # Must match Config.plane, which also moves the clutch reference, cone width
+    # and engagement floor.
+    plane: str = "xz"
 
     # Which point the cursor follows: "index" | "knuckles" | "palm".
     #

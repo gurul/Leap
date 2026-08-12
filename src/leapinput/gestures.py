@@ -144,20 +144,20 @@ class Config:
     # Which plane the hand works in. "xz" = flat over the device (top-down);
     # "xy" = upright, as if drawing on a vertical screen.
     #
-    # xy is the default by request. It needs a DELIBERATE upright posture, palm
-    # facing the screen: held flat out of habit the palm sits 90 deg off the
-    # palm-forward clutch reference, the clutch never engages, and since the clutch
-    # gates all pointer motion the cursor does not move at all. That is what
-    # happened the first time this was defaulted.
+    # MEASURED, 2026-08-12, 590 tracked frames of this user actually trying to
+    # drive the cursor (leapinput.doctor). xz wins on every axis that matters:
     #
-    # Two things make it workable rather than merely default. The clutch cone is
-    # wider here (see clutch_on_deg_xy): an upright hand's palm orientation varies
-    # more, and the sensor's normal estimate is noisier because the device looks UP
-    # from the desk and an upright hand is closer to edge-on. And the height floor
-    # drops, because height is the control axis in this plane.
+    #   clutch reachable   xz 100% of frames (palm 18.9 deg off down)
+    #                      xy   0% of frames (palm 85.4 deg off forward)
+    #   cursor travel      xz  1313px horizontal, 816px vertical
+    #                      xy  1318px horizontal, 410px vertical
     #
-    # --plane xz returns to the flat top-down model, which the sensor tracks best.
-    plane: str = "xy"
+    # The misconception this settles: "up/down" here means moving the hand FORWARD
+    # AND BACK across the desk (z span 178mm), not raising and lowering it (y span
+    # 76mm). Over a device lying flat that is the natural gesture, and it is a
+    # horizontal plane. Flipping invert_* could never have fixed it, because the
+    # vertical axis was being read from the wrong hand axis entirely.
+    plane: str = "xz"
 
     # Height is a SANITY FLOOR, not the engagement gate.
     #

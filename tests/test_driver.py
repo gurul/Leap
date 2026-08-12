@@ -153,10 +153,11 @@ def test_knuckles_mode_ignores_finger_curl():
 
 # --- the upright (xy) plane -------------------------------------------------
 
-def test_xy_is_the_default_plane():
-    """Requires a deliberate upright posture — held flat, the palm is 90 deg off
-    the palm-forward clutch reference and nothing moves at all."""
-    assert Mapping().plane == "xy"
+def test_xz_is_the_default_plane():
+    """Measured, not chosen: over 590 tracked frames of real use the palm sat
+    18.9 deg off down (100% clutchable) versus 85.4 deg off forward (0%), and the
+    desk plane produced 816px of vertical travel against xy's 410px."""
+    assert Mapping().plane == "xz"
 
 
 def test_raising_the_hand_raises_the_cursor_in_xy():
