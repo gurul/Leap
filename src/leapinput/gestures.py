@@ -205,6 +205,12 @@ class Config:
     # so its normal is noisier, and 30 deg proved too tight to hold.
     clutch_on_deg_xy: float = 50.0
     clutch_off_deg_xy: float = 70.0
+
+    # Bypass the clutch entirely: the pointer moves whenever a hand is tracked.
+    # The clutch gates ALL pointer motion, so a posture that cannot reach it looks
+    # exactly like total failure. This makes that recoverable without a diagnosis,
+    # at the cost of the ratchet (no repositioning without moving the cursor).
+    clutch_enabled: bool = True
     clutch_dwell: float = 0.045     # ~5 frames at 110fps
     clutch_release_dwell: float = 0.072
 
@@ -245,6 +251,7 @@ class GestureEngine:
         # counts) but fatal on any timebase that starts near zero.
         self._last_swipe = float("-inf")
         self._now = 0.0
+        self.last_clutch_angle: Optional[float] = None
         self._subscribers: list[Callable[[IntentEvent], None]] = []
 
     def _clock(self, frame: Optional[HandFrame]) -> float:
@@ -312,12 +319,17 @@ class GestureEngine:
 
         # The clutch decides whether the pointer moves at all. Palm angle is
         # independent of every finger, so clicking never breaks it.
-        edge = self.clutch.update(
-            palm_angle_degrees(frame, self.clutch_ref), now)
-        if edge is True:
+        angle = palm_angle_degrees(frame, self.clutch_ref)
+        self.last_clutch_angle = angle
+        if self.cfg.clutch_enabled:
+            edge = self.clutch.update(angle, now)
+            if edge is True:
+                self._emit(Intent.CLUTCH_DOWN, frame)
+            elif edge is False:
+                self._emit(Intent.CLUTCH_UP, frame)
+        elif not self.clutch.state:          # bypass: latch on and stay on
+            self.clutch.state = True
             self._emit(Intent.CLUTCH_DOWN, frame)
-        elif edge is False:
-            self._emit(Intent.CLUTCH_UP, frame)
 
         if self.clutch.state:
             self._emit(Intent.POINT_MOVE, frame)

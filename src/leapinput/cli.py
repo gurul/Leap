@@ -28,6 +28,9 @@ def main(argv=None) -> int:
     ap.add_argument("--plane", choices=("xy", "xz"), default="xy",
                     help="xy: hand upright, drawing on a vertical plane. "
                          "xz: hand flat over the device, top-down")
+    ap.add_argument("--no-clutch", action="store_true",
+                    help="pointer moves whenever a hand is tracked. Use this if "
+                         "the cursor will not move at all; you lose the ratchet")
     ap.add_argument("--clutch-deg", type=float, default=None,
                     help="how far the palm may tilt and still hold the clutch "
                          "(default 30). Raise it if the cursor will not move")
@@ -53,7 +56,8 @@ def main(argv=None) -> int:
     backend = make_backend(args.backend, verbose=args.verbose) \
         if args.backend == "dry-run" else make_backend(args.backend)
 
-    gesture_cfg = Config(hand=args.hand, plane=args.plane)
+    gesture_cfg = Config(hand=args.hand, plane=args.plane,
+                         clutch_enabled=not args.no_clutch)
     if args.clutch_deg is not None:
         gesture_cfg.clutch_on_deg = args.clutch_deg
         gesture_cfg.clutch_off_deg = args.clutch_deg + 15.0
@@ -99,11 +103,29 @@ def main(argv=None) -> int:
     # pipe closes and the guard releases every mouse button.
     guard = Guard().start() if args.backend == "quartz" else None
 
+    def warn_if_stuck() -> None:
+        seen = source.latest.get(args.hand)
+        if seen is None or engine.clutch.state or not gesture_cfg.clutch_enabled:
+            return
+        angle = engine.last_clutch_angle
+        if angle is None:
+            return
+        facing = "toward the screen" if args.plane == "xy" else "down at the desk"
+        print(f"\n  cursor is frozen because the CLUTCH is not engaging.")
+        print(f"  your palm is {angle:.0f} deg off; it must be within "
+              f"{engine.clutch.on_at:.0f} deg of facing {facing}.")
+        print(f"  fixes:  --clutch-deg {max(35, int(angle) + 10)}   "
+              f"|  --no-clutch   |  --plane {'xz' if args.plane == 'xy' else 'xy'}\n")
+
     deadline = time.monotonic() + args.duration if args.duration else None
     with source.open():
         try:
+            warned_at = time.monotonic() + 4.0
             while deadline is None or time.monotonic() < deadline:
                 time.sleep(0.2)
+                if time.monotonic() > warned_at:
+                    warn_if_stuck()
+                    warned_at = time.monotonic() + 8.0
             print(f"\nauto-stopped after {args.duration:.0f}s")
         except KeyboardInterrupt:
             print("\nstopped")
