@@ -48,11 +48,24 @@ class Mapping:
     # motion gets sub-pixel precision; a fast flick crosses the display in ~50mm.
     # Never 1:1 — that is what forces the big arm movements this design exists to
     # avoid. Seeds, to be refit against a Fitts-law harness.
-    gain_min: float = 1.0
-    gain_max: float = 30.0
-    speed_lo: float = 40.0       # mm/s at or below which gain_min applies
-    speed_hi: float = 400.0      # mm/s at or above which gain_max applies
-    deadzone_mm: float = 0.4     # below this per-frame delta, don't move at all
+    # Lowered hard after live use: 1->30 px/mm was hyper-responsive, turning a
+    # 50mm hand movement into a full-screen sweep and making anything smaller than
+    # a button unhittable. 0.25->5 gives ~1:4 at slow speed (fine positioning) and
+    # still crosses the 1512px display in ~300mm of fast travel.
+    gain_min: float = 0.25
+    gain_max: float = 5.0
+    speed_lo: float = 30.0       # mm/s at or below which gain_min applies
+    speed_hi: float = 500.0      # mm/s at or above which gain_max applies
+    deadzone_mm: float = 0.15    # below this per-frame delta, don't move at all
+
+    # Axis direction. Leap desktop mode is +x right, +y up, +z TOWARD the user, and
+    # CG screen space is +y DOWN. So hand-toward-you should read as cursor-down and
+    # the raw signs line up on paper — but the device's physical rotation decides
+    # it, not the datasheet. Rotate the controller 180 degrees (cable toward you
+    # rather than away) and z flips. These make it a config value instead of an
+    # argument: confirmed inverted in live use on this desk, 2026-08-12.
+    invert_x: bool = False
+    invert_z: bool = True
 
     scroll_gain: float = 1.0
 
@@ -81,6 +94,10 @@ class DirectDriver:
         self.backend = backend
         self.map = mapping or Mapping()
         self.w, self.h = backend.screen
+        # Clamp to every display, not just the main one. Displays above or left of
+        # the main have negative CG origins, so clamping at 0 traps the cursor on
+        # the main screen — measured here: the second display lives at (-541,-1440).
+        self.min_x, self.min_y, self.max_x, self.max_y = backend.bounds
         self.x, self.y = self.w / 2.0, self.h / 2.0
         self._filter = OneEuroVec3(freq=110.0, min_cutoff=1.0, beta=0.007)
         self._last: tuple[float, float] | None = None   # last filtered hand x/z
@@ -112,7 +129,9 @@ class DirectDriver:
 
     def _on_point_move(self, event: IntentEvent) -> None:
         frame = event.frame
-        p = frame.position
+        # Rigid knuckle centre, not palm centroid — the centroid drifts as fingers
+        # curl, so a pinch would nudge the cursor off target mid-click.
+        p = frame.center
         fx, _fy, fz = self._filter(p.x, p.y, p.z, frame.timestamp / 1e6)
 
         if self._last is None:              # first frame of this clutch: anchor only
@@ -125,10 +144,15 @@ class DirectDriver:
         if abs(dx_mm) < self.map.deadzone_mm and abs(dz_mm) < self.map.deadzone_mm:
             return                          # resting-hand tremor, not intent
 
+        if self.map.invert_x:
+            dx_mm = -dx_mm
+        if self.map.invert_z:
+            dz_mm = -dz_mm
+
         v = frame.palm_velocity
         gain = self._gain(math.hypot(v.x, v.z))
-        self.x = max(0.0, min(self.w - 1.0, self.x + dx_mm * gain))
-        self.y = max(0.0, min(self.h - 1.0, self.y + dz_mm * gain))
+        self.x = max(self.min_x, min(self.max_x - 1.0, self.x + dx_mm * gain))
+        self.y = max(self.min_y, min(self.max_y - 1.0, self.y + dz_mm * gain))
         self.backend.move(self.x, self.y)
 
     # --- buttons ------------------------------------------------------------

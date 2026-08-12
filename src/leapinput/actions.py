@@ -14,6 +14,8 @@ from typing import Protocol
 
 class Backend(Protocol):
     def move(self, x: float, y: float) -> None: ...
+    @property
+    def bounds(self) -> tuple[float, float, float, float]: ...
     def down(self, x: float, y: float) -> None: ...
     def up(self, x: float, y: float) -> None: ...
     def scroll(self, dy: float) -> None: ...
@@ -25,14 +27,21 @@ class Backend(Protocol):
 class DryRunBackend:
     """Logs instead of acting. The default, deliberately."""
 
-    def __init__(self, screen: tuple[float, float] = (1512.0, 982.0), verbose: bool = False):
+    def __init__(self, screen: tuple[float, float] = (1512.0, 982.0),
+                 bounds: tuple[float, float, float, float] | None = None,
+                 verbose: bool = False):
         self._screen = screen
+        self._bounds = bounds or (0.0, 0.0, screen[0], screen[1])
         self.verbose = verbose
         self.calls: list[tuple] = []
 
     @property
     def screen(self) -> tuple[float, float]:
         return self._screen
+
+    @property
+    def bounds(self) -> tuple[float, float, float, float]:
+        return self._bounds
 
     def _record(self, *call) -> None:
         self.calls.append(call)
@@ -62,7 +71,9 @@ class QuartzBackend:
             kCGScrollEventUnitPixel, kCGEventFlagMaskCommand, kCGEventFlagMaskShift,
             kCGEventFlagMaskAlternate, kCGEventFlagMaskControl,
         )
-        from AppKit import NSScreen
+        from Quartz.CoreGraphics import (
+            CGGetActiveDisplayList, CGDisplayBounds, CGMainDisplayID,
+        )
         from ApplicationServices import AXIsProcessTrusted
 
         if require_permission and not AXIsProcessTrusted():
@@ -83,13 +94,40 @@ class QuartzBackend:
             cmd=kCGEventFlagMaskCommand, shift=kCGEventFlagMaskShift,
             alt=kCGEventFlagMaskAlternate, ctrl=kCGEventFlagMaskControl,
         )
-        frame = NSScreen.mainScreen().frame()
-        self._screen = (float(frame.size.width), float(frame.size.height))
+        # Geometry comes from CGDisplayBounds, NOT NSScreen.
+        #
+        # They disagree, and only one matches the coordinate space CGEventPost
+        # actually uses. CG global space has its origin at the top-left of the main
+        # display with y increasing DOWNWARD; NSScreen uses bottom-left with y up.
+        # Measured on this machine: the second display is at CG (-541,-1440) but
+        # NSScreen calls it (-541,+982). Feeding NSScreen numbers to CGEventPost
+        # puts the cursor in the wrong place on any multi-display layout.
+        main = CGDisplayBounds(CGMainDisplayID())
+        self._screen = (float(main.size.width), float(main.size.height))
+
+        err, ids, count = CGGetActiveDisplayList(16, None, None)
+        rects = [CGDisplayBounds(d) for d in ids[:count]] if not err else [main]
+        self._bounds = (
+            min(float(r.origin.x) for r in rects),
+            min(float(r.origin.y) for r in rects),
+            max(float(r.origin.x + r.size.width) for r in rects),
+            max(float(r.origin.y + r.size.height) for r in rects),
+        )
         self._down = False
 
     @property
     def screen(self) -> tuple[float, float]:
         return self._screen
+
+    @property
+    def bounds(self) -> tuple[float, float, float, float]:
+        """Union of every active display, in CG global coordinates.
+
+        Displays above or left of the main one have NEGATIVE origins, so clamping
+        to (0,0,w,h) silently traps the cursor on the main display — which is
+        exactly what it did before this existed.
+        """
+        return self._bounds
 
     def _mouse(self, event_type, x, y) -> None:
         cg = self._cg

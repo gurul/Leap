@@ -54,10 +54,30 @@ class HandFrame:
 
     extended: tuple[bool, ...]  # thumb, index, middle, ring, pinky
     fingertips: tuple[Vec3, ...]
+    knuckles: tuple[Vec3, ...] = ()   # index..pinky MCP joints; see `center`
 
     @property
     def extended_count(self) -> int:
         return sum(self.extended)
+
+    @property
+    def center(self) -> Vec3:
+        """Rigid palm centre — the knuckle line, not `palm.position`.
+
+        `palm.position` is the centroid of a deforming surface, so it SHIFTS when
+        the fingers curl. Pinching therefore drags the tracked point a few mm and
+        the cursor creeps at the exact moment you are trying to hold still on a
+        target. The four finger MCP joints move as one rigid body with the hand, so
+        their mean stays put through any finger pose.
+
+        Falls back to `position` when knuckles are absent (older recordings).
+        """
+        if not self.knuckles:
+            return self.position
+        n = len(self.knuckles)
+        return Vec3(sum(k.x for k in self.knuckles) / n,
+                    sum(k.y for k in self.knuckles) / n,
+                    sum(k.z for k in self.knuckles) / n)
 
     @property
     def position(self) -> Vec3:
@@ -92,6 +112,9 @@ class HandFrame:
             grab_angle=hand.grab_angle,
             extended=tuple(bool(d.is_extended) for d in digits),
             fingertips=tuple(Vec3.of(d.distal.next_joint) for d in digits),
+            # Index..pinky only: the thumb metacarpal is mobile and would reintroduce
+            # exactly the pose-dependent drift this is here to remove.
+            knuckles=tuple(Vec3.of(d.metacarpal.next_joint) for d in digits[1:]),
         )
 
 
