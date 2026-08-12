@@ -8,7 +8,7 @@ import time
 
 from . import (
     Config, DirectDriver, GestureEngine, Intent, LeapSource, Mapping,
-    ShortcutDriver, make_backend, server_status,
+    ShortcutDriver, Snapshot, make_backend, server_status,
 )
 
 
@@ -20,6 +20,10 @@ def main(argv=None) -> int:
     ap.add_argument("--shortcuts", action="store_true",
                     help="also map swipes to Spaces / app switcher")
     ap.add_argument("--verbose", action="store_true", help="log pointer moves too")
+    ap.add_argument("--duration", type=float, default=120.0,
+                    help="stop automatically after N seconds (0 = no limit). A "
+                         "runaway that owns the cursor is hard to quit by hand, so "
+                         "the real backend always gets a deadline by default.")
     args = ap.parse_args(argv)
 
     status = server_status()
@@ -49,14 +53,28 @@ def main(argv=None) -> int:
 
     w, h = backend.screen
     print(f"screen {w:.0f}x{h:.0f} | backend={args.backend} | hand={args.hand}")
-    print(f"Raise your {args.hand.lower()} hand above the device to engage. Ctrl-C to quit.")
+    if args.backend == "quartz":
+        print("\n  *** DRIVING THE REAL CURSOR ***")
+        print("  Drop your hand to the desk to release it — the device stops")
+        print("  tracking entirely, so that is a hard disengage, not a threshold.")
+        print("  pinch = click/drag   fist = grab   Ctrl-C to quit")
+        if args.duration:
+            print(f"  auto-stops after {args.duration:.0f}s")
+    print(f"\nRaise your {args.hand.lower()} hand above the device to engage.")
 
+    deadline = time.monotonic() + args.duration if args.duration else None
     with source.open():
         try:
-            while True:
-                time.sleep(0.5)
+            while deadline is None or time.monotonic() < deadline:
+                time.sleep(0.2)
+            print(f"\nauto-stopped after {args.duration:.0f}s")
         except KeyboardInterrupt:
-            print(f"\n{source.frames} frames")
+            print("\nstopped")
+        finally:
+            # Never exit holding a button — that would strand the mouse down and
+            # leave the machine selecting everything the user touches.
+            engine.on_snapshot(Snapshot())
+    print(f"{source.frames} frames")
     return 0
 
 
