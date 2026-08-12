@@ -1,0 +1,27 @@
+[project]
+name = "leapinput"
+version = "0.1.0"
+description = "Leap Motion hand tracking to macOS computer-use actions"
+requires-python = "==3.12.*"  # pinned by the SDK's bundled _leapc_cffi.cpython-312 module
+dependencies = [
+    "cffi",
+    "pyobjc-framework-Quartz",
+    "pyobjc-framework-Cocoa",
+    "pyobjc-framework-ApplicationServices",
+]
+
+[project.scripts]
+leapinput = "leapinput.cli:main"
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

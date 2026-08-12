@@ -1,0 +1,11 @@
+Metadata-Version: 2.4
+Name: leapinput
+Version: 0.1.0
+Summary: Leap Motion hand tracking to macOS computer-use actions
+Requires-Python: ==3.12.*
+Requires-Dist: cffi
+Requires-Dist: pyobjc-framework-Quartz
+Requires-Dist: pyobjc-framework-Cocoa
+Requires-Dist: pyobjc-framework-ApplicationServices
+Provides-Extra: dev
+Requires-Dist: pytest; extra == "dev"
