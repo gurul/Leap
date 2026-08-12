@@ -76,6 +76,34 @@ def main(argv=None) -> int:
         if best is None or engageable > best[1]:
             best = (plane, engageable)
 
+    # Which hand axes actually carry signal, and what the driver makes of them.
+    from .driver import DirectDriver, Mapping
+    from .actions import DryRunBackend
+    from .gestures import Intent, IntentEvent
+
+    print("5. axis travel   how far each hand axis actually moved")
+    for name, vals in (("x (left/right)", [f.track_point("index").x for f in samples]),
+                       ("y (up/down)   ", [f.track_point("index").y for f in samples]),
+                       ("z (depth)     ", [f.track_point("index").z for f in samples])):
+        span = max(vals) - min(vals)
+        flag = "" if span > 20 else "   <-- barely moved"
+        print(f"     {name}  span {span:>6.0f}mm  "
+              f"[{min(vals):>6.0f} .. {max(vals):>6.0f}]{flag}")
+
+    print("6. cursor result what the driver produces from those frames")
+    for plane in ("xy", "xz"):
+        backend = DryRunBackend(bounds=(0.0, 0.0, 1512.0, 982.0))
+        driver = DirectDriver(backend, Mapping(plane=plane))
+        driver.on_intent(IntentEvent(Intent.CLUTCH_DOWN, 0.0, samples[0]))
+        xs, ys = [], []
+        for f in samples:
+            driver.on_intent(IntentEvent(Intent.POINT_MOVE, f.timestamp / 1e6, f))
+            xs.append(driver.x)
+            ys.append(driver.y)
+        print(f"     plane {plane}: cursor x moved {max(xs)-min(xs):>5.0f}px, "
+              f"y moved {max(ys)-min(ys):>5.0f}px"
+              + ("" if max(ys) - min(ys) > 30 else "   <-- UP/DOWN IS DEAD"))
+
     print("\n=== diagnosis ===")
     if pct < 60:
         print(f"  The sensor only sees your hand {pct:.0f}% of the time. The device")
