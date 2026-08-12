@@ -75,7 +75,12 @@ class Mapping:
     # faces you and z flips. Exposed as --invert-x / --invert-z so it can be
     # settled by trying it rather than by reasoning about sign conventions.
     invert_x: bool = True       # confirmed by use 2026-08-12
-    invert_z: bool = False      # confirmed correct by use 2026-08-12
+    invert_z: bool = False      # applies to the vertical axis in both planes
+
+    # "xy" = upright hand on a vertical plane (raise the hand, the cursor rises).
+    # "xz" = hand flat over the device, top-down. Must match Config.plane, which
+    # also moves the clutch reference and the engagement floor.
+    plane: str = "xy"
 
     # Which point the cursor follows: "index" | "knuckles" | "palm".
     #
@@ -151,14 +156,19 @@ class DirectDriver:
     def _on_point_move(self, event: IntentEvent) -> None:
         frame = event.frame
         p = frame.track_point(self.map.tracking_point)
-        fx, _fy, fz = self._filter(p.x, p.y, p.z, frame.timestamp / 1e6)
+        fx, fy, fz = self._filter(p.x, p.y, p.z, frame.timestamp / 1e6)
+
+        # In xy the vertical screen axis comes from hand HEIGHT, and it is negated
+        # because hand +y is up while CG screen +y is down: raise the hand, the
+        # cursor rises. In xz it comes from hand depth.
+        vertical = -fy if self.map.plane == "xy" else fz
 
         if self._last is None:              # first frame of this clutch: anchor only
-            self._last = (fx, fz)
+            self._last = (fx, vertical)
             return
 
-        dx_mm, dz_mm = fx - self._last[0], fz - self._last[1]
-        self._last = (fx, fz)
+        dx_mm, dz_mm = fx - self._last[0], vertical - self._last[1]
+        self._last = (fx, vertical)
 
         if abs(dx_mm) < self.map.deadzone_mm and abs(dz_mm) < self.map.deadzone_mm:
             return                          # resting-hand tremor, not intent
@@ -169,7 +179,7 @@ class DirectDriver:
             dz_mm = -dz_mm
 
         v = frame.palm_velocity
-        gain = self._gain(math.hypot(v.x, v.z))
+        gain = self._gain(math.hypot(v.x, v.y if self.map.plane == "xy" else v.z))
         self.x = max(self.min_x, min(self.max_x - 1.0, self.x + dx_mm * gain))
         self.y = max(self.min_y, min(self.max_y - 1.0, self.y + dz_mm * gain))
         self.backend.move(self.x, self.y)

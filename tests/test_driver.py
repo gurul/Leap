@@ -39,7 +39,7 @@ def drive(driver, frames):
 
 def make(mapping=None, bounds=LAPTOP_PLUS_MONITOR):
     backend = DryRunBackend(bounds=bounds)
-    return DirectDriver(backend, mapping or Mapping()), backend
+    return DirectDriver(backend, mapping or Mapping(plane="xz")), backend
 
 
 # --- inversion --------------------------------------------------------------
@@ -47,8 +47,8 @@ def make(mapping=None, bounds=LAPTOP_PLUS_MONITOR):
 def test_left_right_is_inverted_by_default():
     """Confirmed by use on this desk 2026-08-12: without this the cursor mirrors
     your hand horizontally."""
-    assert Mapping().invert_x is True
-    assert Mapping().invert_z is False
+    assert Mapping(plane="xz").invert_x is True
+    assert Mapping(plane="xz").invert_z is False
 
 
 def test_hand_toward_user_moves_cursor_down_by_default():
@@ -61,16 +61,16 @@ def test_hand_toward_user_moves_cursor_down_by_default():
 
 
 def test_inversion_is_configurable_per_axis():
-    a, _ = make(Mapping(invert_z=False))
-    b, _ = make(Mapping(invert_z=True))
+    a, _ = make(Mapping(plane="xz", invert_z=False))
+    b, _ = make(Mapping(plane="xz", invert_z=True))
     for d in (a, b):
         drive(d, [frame(0, 150, 0, 0), frame(0, 150, 20, 100_000)])
     assert (a.y - 491.0) == -(b.y - 491.0), "invert_z must mirror the motion exactly"
 
 
 def test_invert_x_mirrors_horizontal_motion():
-    a, _ = make(Mapping(invert_x=False))
-    b, _ = make(Mapping(invert_x=True))
+    a, _ = make(Mapping(plane="xz", invert_x=False))
+    b, _ = make(Mapping(plane="xz", invert_x=True))
     for d in (a, b):
         drive(d, [frame(0, 150, 0, 0), frame(20, 150, 0, 100_000)])
     assert (a.x - 756.0) == -(b.x - 756.0)
@@ -127,14 +127,14 @@ def test_reclutching_does_not_teleport_the_cursor():
 # --- tracking point ---------------------------------------------------------
 
 def test_index_fingertip_is_the_default_pointer():
-    assert Mapping().tracking_point == "index"
+    assert Mapping(plane="xz").tracking_point == "index"
 
 
 def test_every_tracking_point_produces_motion():
     """Each mode must actually follow the hand — a mis-wired selector that always
     returned a constant would silently freeze the cursor."""
     for kind in ("index", "knuckles", "palm"):
-        driver, _ = make(Mapping(tracking_point=kind))
+        driver, _ = make(Mapping(plane="xz", tracking_point=kind))
         start = driver.x
         drive(driver, [frame(0, 150, 0, 0), frame(30, 150, 0, 100_000)])
         assert driver.x != start, f"{kind} did not move the cursor"
@@ -142,10 +142,49 @@ def test_every_tracking_point_produces_motion():
 
 def test_knuckles_mode_ignores_finger_curl():
     """The rigid alternative: same hand position, fingers curled to pinch."""
-    driver, _ = make(Mapping(tracking_point="knuckles"))
+    driver, _ = make(Mapping(plane="xz", tracking_point="knuckles"))
     a = frame(0, 150, 0, 0)
     b = frame(0, 150, 0, 100_000)
     curled = HandFrame(**{**b.__dict__, "fingertips": tuple(
         Vec3(t.x - 25.0, t.y - 20.0, t.z + 30.0) for t in b.fingertips)})
     drive(driver, [a, curled])
     assert (driver.x, driver.y) == (a and driver.x, driver.y)   # no jump
+
+
+# --- the upright (xy) plane -------------------------------------------------
+
+def test_xy_is_the_default_plane():
+    assert Mapping().plane == "xy"
+
+
+def test_raising_the_hand_raises_the_cursor_in_xy():
+    """The upright model: hand height drives screen height directly."""
+    driver, _ = make(Mapping(plane="xy"))
+    start = driver.y
+    drive(driver, [frame(0, 150, 0, 0), frame(0, 200, 0, 100_000)])
+    assert driver.y < start, "raising the hand should move the cursor up"
+
+
+def test_lowering_the_hand_lowers_the_cursor_in_xy():
+    driver, _ = make(Mapping(plane="xy"))
+    start = driver.y
+    drive(driver, [frame(0, 200, 0, 0), frame(0, 150, 100_000)] if False else
+                  [frame(0, 200, 0, 0), frame(0, 150, 0, 100_000)])
+    assert driver.y > start
+
+
+def test_xy_ignores_hand_depth():
+    """Pushing the hand toward or away from the screen must not move the cursor
+    in the upright model — only the plane it is drawing on counts."""
+    driver, _ = make(Mapping(plane="xy"))
+    before = (driver.x, driver.y)
+    drive(driver, [frame(0, 150, 0, 0), frame(0, 150, 60, 100_000)])
+    assert (driver.x, driver.y) == before
+
+
+def test_xz_ignores_hand_height():
+    """The mirror property: hovering higher must not move a top-down cursor."""
+    driver, _ = make(Mapping(plane="xz"))
+    before = (driver.x, driver.y)
+    drive(driver, [frame(0, 150, 0, 0), frame(0, 220, 0, 100_000)])
+    assert (driver.x, driver.y) == before

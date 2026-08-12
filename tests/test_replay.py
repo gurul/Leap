@@ -41,7 +41,8 @@ def fired():
     """{step: {intent: count}} from replaying the whole session."""
     rows = [json.loads(line) for line in SESSION.open()]
     out: dict[str, dict[str, int]] = {}
-    engine = GestureEngine(Config())
+    # The recorded corpus is hand-flat-over-device, i.e. the xz plane.
+    engine = GestureEngine(Config(plane="xz"))
     step = {"now": None}
 
     def record(event):

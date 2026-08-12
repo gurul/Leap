@@ -25,6 +25,9 @@ def main(argv=None) -> int:
                     help="flip left/right (try it if the cursor mirrors you)")
     ap.add_argument("--invert-z", action="store_true",
                     help="flip up/down (depends on which way the device faces)")
+    ap.add_argument("--plane", choices=("xy", "xz"), default="xy",
+                    help="xy: hand upright, drawing on a vertical plane. "
+                         "xz: hand flat over the device, top-down")
     ap.add_argument("--gain", type=float, default=1.0,
                     help="sensitivity multiplier; 2 = twice as fast, 0.5 = half")
     ap.add_argument("--point", choices=("index", "knuckles", "palm"),
@@ -47,8 +50,9 @@ def main(argv=None) -> int:
     backend = make_backend(args.backend, verbose=args.verbose) \
         if args.backend == "dry-run" else make_backend(args.backend)
 
-    engine = GestureEngine(Config(hand=args.hand))
-    direct = DirectDriver(backend, Mapping(invert_x=args.invert_x,
+    engine = GestureEngine(Config(hand=args.hand, plane=args.plane))
+    direct = DirectDriver(backend, Mapping(plane=args.plane,
+                                          invert_x=args.invert_x,
                                           invert_z=args.invert_z,
                                           gain_scale=args.gain,
                                           tracking_point=args.point))
@@ -71,7 +75,12 @@ def main(argv=None) -> int:
         print("\n  *** DRIVING THE REAL CURSOR ***")
         print("  Drop your hand to the desk to release it — the device stops")
         print("  tracking entirely, so that is a hard disengage, not a threshold.")
-        print("  pinch = click/drag   fist = grab   Ctrl-C to quit")
+        if args.plane == "xy":
+            print("  Hold your hand UPRIGHT, palm facing the screen, as if drawing")
+            print("  on it. Raise/lower to move up/down; height is the cursor axis.")
+        else:
+            print("  Hold your hand FLAT over the device, palm down.")
+        print("  pinch = click   fist+move = scroll   turn palm away = park cursor")
         if args.duration:
             print(f"  auto-stops after {args.duration:.0f}s")
     print(f"\nRaise your {args.hand.lower()} hand above the device to engage.")

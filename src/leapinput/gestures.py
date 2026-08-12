@@ -22,17 +22,34 @@ from typing import Callable, Optional
 from .capture import HandFrame, Snapshot
 
 
-def palm_down_degrees(frame: HandFrame) -> float:
-    """Angle between the palm normal and straight down, in degrees.
+# Where the palm must face for the clutch to engage, per interaction plane.
+#   xz — hand hovering FLAT over the device: palm faces down.
+#   xy — hand held UPRIGHT, drawing on a vertical plane: palm faces away from you.
+# The clutch reference has to follow the plane. A palm-down clutch is unreachable
+# when the hand is deliberately held vertical — the posture that defines xy mode is
+# exactly the posture that releases an xz clutch.
+CLUTCH_REFERENCE = {
+    "xz": (0.0, -1.0, 0.0),     # straight down
+    "xy": (0.0, 0.0, -1.0),     # away from the user, toward the screen
+}
 
-    0 deg = flat palm-down (the neutral resting posture); 90 deg = palm vertical.
-    The normal points out of the palm, so palm-down is normal.y == -1.
+
+def palm_angle_degrees(frame: HandFrame, reference: tuple) -> float:
+    """Angle between the palm normal and `reference`, in degrees.
+
+    0 deg = palm squarely facing the reference direction; 90 deg = edge-on.
     """
     n = frame.palm_normal
     mag = math.sqrt(n.x * n.x + n.y * n.y + n.z * n.z)
     if mag == 0.0:
         return 180.0                    # unusable normal: treat as clutch-off
-    return math.degrees(math.acos(max(-1.0, min(1.0, -n.y / mag))))
+    dot = (n.x * reference[0] + n.y * reference[1] + n.z * reference[2]) / mag
+    return math.degrees(math.acos(max(-1.0, min(1.0, dot))))
+
+
+def palm_down_degrees(frame: HandFrame) -> float:
+    """Angle from straight down. Retained for the xz plane and its tests."""
+    return palm_angle_degrees(frame, CLUTCH_REFERENCE["xz"])
 
 
 class Intent(str, Enum):
@@ -124,6 +141,11 @@ class Config:
 
     hand: str = "Right"
 
+    # Which plane the hand works in. "xz" = flat over the device (top-down);
+    # "xy" = upright, as if drawing on a vertical screen. This is not only a
+    # driver concern: it moves the clutch reference and the height floor too.
+    plane: str = "xy"
+
     # Height is a SANITY FLOOR, not the engagement gate.
     #
     # Measured: hand resting on the desk produces NO TRACKING AT ALL (the rest step
@@ -132,9 +154,14 @@ class Config:
     # The real gate is hand presence, which the device gives for free and which no
     # threshold can get wrong. This floor only rejects implausibly low readings —
     # session y-minimum was 124mm, p2 was 131mm.
+    # In xy mode HEIGHT IS THE CONTROL AXIS, so a meaningful floor would fight the
+    # gesture — lowering the hand to move the cursor down would disengage. The
+    # floor drops to a bare sanity check there; hand presence remains the real gate.
     engage_y: float = 115.0
     release_y: float = 100.0
     engage_dwell: float = 0.08
+    engage_y_xy: float = 40.0
+    release_y_xy: float = 25.0
 
     # Select = thumb/index pinch, measured in mm rather than pinch_strength: on a v1
     # controller the strength curve is coarse, but the distance separation is huge —
@@ -182,7 +209,12 @@ class GestureEngine:
 
     def __init__(self, config: Optional[Config] = None):
         self.cfg = config or Config()
-        self.engaged = Schmitt(self.cfg.engage_y, self.cfg.release_y, self.cfg.engage_dwell)
+        xy = self.cfg.plane == "xy"
+        self.clutch_ref = CLUTCH_REFERENCE[self.cfg.plane]
+        self.engaged = Schmitt(
+            self.cfg.engage_y_xy if xy else self.cfg.engage_y,
+            self.cfg.release_y_xy if xy else self.cfg.release_y,
+            self.cfg.engage_dwell)
         self.pinch = Schmitt(self.cfg.pinch_on_mm, self.cfg.pinch_off_mm, self.cfg.pinch_dwell)
         self.grab = Schmitt(self.cfg.grab_on, self.cfg.grab_off, self.cfg.grab_dwell)
         # on_at < off_at: a SMALL angle means palm-down means engaged.
@@ -261,7 +293,8 @@ class GestureEngine:
 
         # The clutch decides whether the pointer moves at all. Palm angle is
         # independent of every finger, so clicking never breaks it.
-        edge = self.clutch.update(palm_down_degrees(frame), now)
+        edge = self.clutch.update(
+            palm_angle_degrees(frame, self.clutch_ref), now)
         if edge is True:
             self._emit(Intent.CLUTCH_DOWN, frame)
         elif edge is False:
