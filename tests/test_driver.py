@@ -230,3 +230,34 @@ def test_edge_damping_limits_runaway_travel():
         drive(driver, frames)
     assert abs(far.x - 756.0) < abs(near.x - 756.0), \
         "edge travel should move the cursor less than core travel"
+
+
+# --- intent routing ----------------------------------------------------------
+
+def test_a_fist_presses_a_real_mouse_button():
+    """The bug: the vocabulary moved to fist-as-click, but the driver only had
+    handlers for select.*, so grab.down was emitted into nothing for a whole
+    session and the click silently did nothing."""
+    driver, backend = make()
+    driver.on_intent(IntentEvent(Intent.GRAB_DOWN, 0.0, None))
+    driver.on_intent(IntentEvent(Intent.GRAB_UP, 0.0, None))
+    assert [c[0] for c in backend.calls] == ["down", "up"]
+
+
+def test_an_unrouted_intent_is_reported_not_swallowed(capsys):
+    """Silent getattr dispatch is what let the missing grab handler survive.
+    Every intent that is neither handled nor explicitly ignored must complain."""
+    driver, _ = make()
+
+    class Fake(str):
+        name = "TOTALLY_UNROUTED"
+        value = "totally.unrouted"
+
+    driver.on_intent(IntentEvent(Fake("x"), 0.0, None))
+    assert "no handler" in capsys.readouterr().err
+
+
+def test_deliberately_ignored_intents_stay_quiet(capsys):
+    driver, _ = make()
+    driver.on_intent(IntentEvent(Intent.ENGAGE, 0.0, None))
+    assert capsys.readouterr().err == ""

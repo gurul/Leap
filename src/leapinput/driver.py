@@ -9,6 +9,7 @@ interchangeable, and can run side by side (direct pointing, agent-dispatched swi
 from __future__ import annotations
 
 import math
+import sys
 from dataclasses import dataclass
 
 from .actions import Backend
@@ -140,6 +141,7 @@ class DirectDriver:
         self.x, self.y = self.w / 2.0, self.h / 2.0
         self._filter = OneEuroVec3(freq=110.0, min_cutoff=1.0, beta=0.007)
         self._last: tuple[float, float] | None = None   # last filtered hand x/z
+        self._warned: set[str] = set()
 
     def _gain(self, speed: float) -> float:
         lo, hi = self.map.speed_lo, self.map.speed_hi
@@ -157,10 +159,23 @@ class DirectDriver:
             return 0.0
         return (cap - ecc) / (cap - ok)
 
+    #: Intents this driver deliberately does not act on. Anything NOT listed here
+    #: and NOT handled is a wiring bug, and gets reported rather than swallowed.
+    IGNORED = frozenset({"engage", "scroll",
+                         "swipe.left", "swipe.right", "swipe.up", "swipe.down"})
+
     def on_intent(self, event: IntentEvent) -> None:
         handler = getattr(self, f"_on_{event.intent.name.lower()}", None)
         if handler:
             handler(event)
+        elif event.intent.value not in self.IGNORED:
+            # Silent getattr dispatch is how a fist emitted grab.down for a whole
+            # session with no mouse button behind it. An unrouted intent is a bug,
+            # so say so once instead of doing nothing forever.
+            if event.intent.value not in self._warned:
+                self._warned.add(event.intent.value)
+                print(f"  [driver] no handler for intent {event.intent.value!r} "
+                      f"— this gesture does nothing", file=sys.stderr)
 
     # --- clutch: the ratchet ------------------------------------------------
 
@@ -220,6 +235,15 @@ class DirectDriver:
         self.backend.down(self.x, self.y)
 
     def _on_select_up(self, event: IntentEvent) -> None:
+        self.backend.up(self.x, self.y)
+
+    # A fist IS the button in the finger-ladder vocabulary. These were missing
+    # while the vocabulary moved off pinch, so the fist emitted grab.down into
+    # nothing and the click silently did nothing at all.
+    def _on_grab_down(self, event: IntentEvent) -> None:
+        self.backend.down(self.x, self.y)
+
+    def _on_grab_up(self, event: IntentEvent) -> None:
         self.backend.up(self.x, self.y)
 
     def _on_scroll(self, event: IntentEvent) -> None:
