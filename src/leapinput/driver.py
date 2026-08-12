@@ -49,7 +49,7 @@ class DirectDriver:
         self._primed = False
 
     def _project(self, frame: HandFrame) -> tuple[float, float]:
-        p = frame.palm_stable
+        p = frame.position
         return (_remap(p.x, self.map.x_min, self.map.x_max, self.w),
                 _remap(p.z, self.map.z_far, self.map.z_near, self.h))
 

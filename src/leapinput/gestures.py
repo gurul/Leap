@@ -158,7 +158,7 @@ class GestureEngine:
                 self._emit(Intent.DISENGAGE, None)
             return
 
-        edge = self.engaged.update(frame.palm_stable.y, now)
+        edge = self.engaged.update(frame.position.y, now)
         if edge is True:
             self._emit(Intent.ENGAGE, frame)
         elif edge is False:

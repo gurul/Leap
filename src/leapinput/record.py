@@ -21,6 +21,7 @@ from collections import defaultdict
 from typing import Optional
 
 from .capture import HandFrame, LeapSource, Snapshot
+from .viz import BOLD, RESET, LivePanel, _safe
 
 
 @dataclasses.dataclass
@@ -28,17 +29,34 @@ class Step:
     label: str
     instruction: str
     seconds: float
+    # Signature the captured frames must satisfy, as (description, predicate over
+    # the step's median frame). A timed protocol silently records the *previous*
+    # pose if the user is slower than the countdown — that produced a full
+    # one-step label shift on 2026-08-12, and every threshold derived from it was
+    # wrong in a way that looked plausible. Each step now proves it captured what
+    # it claims, and says so at record time rather than in analysis.
+    expect: Optional[tuple] = None
 
 
+# Predicates take a HandFrame so the same check drives the live panel and the
+# post-capture validation. One definition, so what you watch is what is enforced.
 PROTOCOL = [
-    Step("rest", "Rest your hand flat on the desk, in front of the device", 4),
-    Step("hover", "Hold your hand at a comfortable working height, still", 4),
-    Step("roam", "Move your hand around the whole area you'd want to reach", 6),
-    Step("pinch", "Pinch thumb+index together and HOLD", 4),
-    Step("open", "Open your hand flat, fingers spread", 4),
-    Step("fist", "Close a full fist and HOLD", 4),
-    Step("two_finger", "Index + middle extended, others curled. Move up and down", 5),
-    Step("swipe", "Swipe left and right, briskly, about 4 times", 6),
+    Step("rest", "Rest your hand flat on the desk, in front of the device", 3),
+    Step("hover", "Hold your hand still at a comfortable working height", 4,
+         ("hand in view, steady", lambda f: f.position.y > 80)),
+    Step("roam", "Move your hand around the whole area you'd want to reach", 6,
+         ("hand in view", lambda f: f.position.y > 60)),
+    Step("pinch", "Pinch thumb+index firmly together and HOLD", 4,
+         ("thumb+index close", lambda f: f.pinch_distance < 40)),
+    Step("open", "Open your hand flat, fingers spread wide", 4,
+         ("4+ fingers extended", lambda f: sum(f.extended) >= 4)),
+    Step("fist", "Close a tight fist and HOLD", 4,
+         ("fingers curled", lambda f: sum(f.extended) <= 1 and f.grab_strength > 0.5)),
+    Step("two_finger", "Index + middle extended, others curled. Move up and down", 5,
+         ("index+middle only", lambda f: f.extended[1] and f.extended[2]
+          and not f.extended[3] and not f.extended[4])),
+    Step("swipe", "Swipe left and right, briskly, about 4 times", 6,
+         ("fast sideways motion", lambda f: abs(f.palm_velocity.x) > 150)),
 ]
 
 
@@ -54,34 +72,85 @@ def _flatten(frame: HandFrame) -> dict:
 
 def capture(path: str, hand: str) -> int:
     rows: list[dict] = []
+    frames: dict[str, list[HandFrame]] = {}
     current: Optional[str] = None
 
     def on_snapshot(snap: Snapshot) -> None:
         frame = snap.get(hand)
         if frame is not None and current is not None:
             rows.append({"step": current, **_flatten(frame)})
+            frames.setdefault(current, []).append(frame)
 
     source = LeapSource()
     source.subscribe(on_snapshot)
 
-    print(f"Recording {hand.lower()} hand. Follow each prompt.\n")
+    print(f"Recording {hand.lower()} hand.")
+    print("Watch the panel. Get into the pose, wait for ✓ MATCH, then press Enter.\n")
+    warnings: list[str] = []
+
     with source.open():
-        for step in PROTOCOL:
-            print(f"  {step.instruction}")
-            for n in (3, 2, 1):
-                print(f"    starting in {n}...", end="\r", flush=True)
-                time.sleep(1)
-            current = step.label
-            print(f"    RECORDING {step.seconds:.0f}s ......", end="", flush=True)
-            time.sleep(step.seconds)
-            current = None
-            got = sum(1 for r in rows if r["step"] == step.label)
-            print(f" {got} frames" + ("  <-- NO HAND SEEN" if got == 0 else ""))
+        panel = LivePanel(source, hand).start()
+        try:
+            for step in PROTOCOL:
+                panel.target = step.expect
+                print(f"\n  {BOLD}{step.instruction}{RESET}")
+                input("    press Enter when ready > ")
+
+                current = step.label
+                print(f"    recording {step.seconds:.0f}s ...", end="", flush=True)
+                time.sleep(step.seconds)
+                current = None
+
+                captured = frames.get(step.label, [])
+                expected_frames = step.seconds * 100
+                print(f" {len(captured)} frames")
+
+                if step.label == "rest":
+                    # The device cannot see a hand resting on the desk — it sits below
+                    # the tracking volume. Zero frames is the expected, useful result.
+                    print("      (0 expected — a resting hand is invisible to the"
+                          " device, which is what makes it a free disengage)"
+                          if not captured else
+                          f"      note: {len(captured)} frames seen while 'resting'")
+                    continue
+
+                if not captured:
+                    warnings.append(f"{step.label}: NO FRAMES — hand not seen")
+                    print("      !! no frames captured")
+                    continue
+                if len(captured) < expected_frames * 0.6:
+                    rate = len(captured) / step.seconds
+                    warnings.append(f"{step.label}: only {len(captured)} frames "
+                                    f"(~{rate:.0f} fps) — hand kept leaving view")
+                    print(f"      !! sparse: ~{rate:.0f} fps, expected ~100")
+
+                if step.expect:
+                    desc, predicate = step.expect
+                    hits = sum(1 for f in captured if _safe(predicate, f))
+                    ratio = hits / len(captured)
+                    if ratio < 0.7:
+                        warnings.append(f"{step.label}: pose held for only "
+                                        f"{ratio*100:.0f}% of frames ({desc})")
+                        print(f"      !! pose check FAILED — {desc} true for only "
+                              f"{ratio*100:.0f}% of frames")
+                    else:
+                        print(f"      pose check ok — {desc} "
+                              f"({ratio*100:.0f}% of frames)")
+        finally:
+            panel.stop()
 
     with open(path, "w") as fh:
         for row in rows:
             fh.write(json.dumps(row) + "\n")
     print(f"\nwrote {len(rows)} frames to {path}")
+
+    if warnings:
+        print("\n=== PROBLEMS — thresholds from this session would be wrong ===")
+        for w in warnings:
+            print(f"  {w}")
+        print("Re-run the affected steps before trusting `analyze`.")
+        return 2
+    print("all steps validated")
     return 0 if rows else 1
 
 

@@ -38,8 +38,11 @@ class HandFrame:
     side: str                   # "Left" | "Right"
     confidence: float
 
-    palm: Vec3                  # raw palm centre
-    palm_stable: Vec3           # Leap's own jitter-reduced palm position — prefer this
+    palm: Vec3                  # raw palm centre — the one to use, see `position`
+    palm_stable: Vec3           # Leap's stabilized palm. MEASURED AS ALWAYS (0,0,0) on
+                                # Hyperion 6.2 + v1 controller. Recorded so we notice if
+                                # a future release starts populating it. Do not consume
+                                # it directly — use `position`.
     palm_velocity: Vec3         # mm/s
     palm_normal: Vec3           # points out of the palm
     palm_direction: Vec3        # points from palm toward the fingers
@@ -55,6 +58,19 @@ class HandFrame:
     @property
     def extended_count(self) -> int:
         return sum(self.extended)
+
+    @property
+    def position(self) -> Vec3:
+        """Palm position, preferring Leap's stabilized value when it exists.
+
+        Hyperion 6.2 with a v1 controller reports `stabilized_position` as exactly
+        (0,0,0) on every frame — measured over 3050 frames on 2026-08-12. Consuming
+        it directly silently zeroes the engagement height and the cursor mapping.
+        This picks the raw palm in that case, and will pick up the stabilized value
+        for free if a later release starts filling it in.
+        """
+        s = self.palm_stable
+        return self.palm if (s.x == 0.0 and s.y == 0.0 and s.z == 0.0) else s
 
     @classmethod
     def of(cls, hand, frame_id: int, timestamp: int) -> "HandFrame":
