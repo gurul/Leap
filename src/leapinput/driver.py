@@ -8,9 +8,11 @@ interchangeable, and can run side by side (direct pointing, agent-dispatched swi
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 from .actions import Backend
+from .oneeuro import OneEuroVec3
 from .capture import HandFrame
 from .gestures import Intent, IntentEvent
 
@@ -42,7 +44,16 @@ class Mapping:
     z_far: float = 15.0      # away from you -> top of screen
     z_near: float = 84.0     # toward you   -> bottom of screen
 
-    smoothing: float = 0.45
+    # Non-linear control-display gain, px per mm of hand travel. Slow deliberate
+    # motion gets sub-pixel precision; a fast flick crosses the display in ~50mm.
+    # Never 1:1 — that is what forces the big arm movements this design exists to
+    # avoid. Seeds, to be refit against a Fitts-law harness.
+    gain_min: float = 1.0
+    gain_max: float = 30.0
+    speed_lo: float = 40.0       # mm/s at or below which gain_min applies
+    speed_hi: float = 400.0      # mm/s at or above which gain_max applies
+    deadzone_mm: float = 0.4     # below this per-frame delta, don't move at all
+
     scroll_gain: float = 1.0
 
 
@@ -52,45 +63,72 @@ def _remap(value: float, lo: float, hi: float, out_hi: float) -> float:
 
 
 class DirectDriver:
-    """Hand as mouse. Pointer position is only ever updated while engaged."""
+    """Hand as mouse, RELATIVE with a clutch ratchet.
+
+    Absolute mapping was tried and abandoned on measured evidence. The reachable
+    volume is a wide, shallow, right-shifted slab, so mapping it onto the display
+    pushes the hand to the edge of tracking to reach the screen edge — a live 60s
+    session lost tracking five times. Relative control decouples the two: move,
+    release the clutch, reposition anywhere comfortable, re-engage. Exactly what
+    lifting a mouse does.
+
+    The cursor only moves between CLUTCH_DOWN and CLUTCH_UP, and it moves by
+    integrated hand delta from the anchor — never by absolute position, which
+    would teleport on every re-clutch and void the whole mechanism.
+    """
 
     def __init__(self, backend: Backend, mapping: Mapping | None = None):
         self.backend = backend
         self.map = mapping or Mapping()
         self.w, self.h = backend.screen
         self.x, self.y = self.w / 2.0, self.h / 2.0
-        self._primed = False
+        self._filter = OneEuroVec3(freq=110.0, min_cutoff=1.0, beta=0.007)
+        self._last: tuple[float, float] | None = None   # last filtered hand x/z
 
-    def _project(self, frame: HandFrame) -> tuple[float, float]:
-        p = frame.position
-        return (_remap(p.x, self.map.x_min, self.map.x_max, self.w),
-                _remap(p.z, self.map.z_far, self.map.z_near, self.h))
+    def _gain(self, speed: float) -> float:
+        lo, hi = self.map.speed_lo, self.map.speed_hi
+        t = 0.0 if speed <= lo else 1.0 if speed >= hi else (speed - lo) / (hi - lo)
+        return self.map.gain_min + t * (self.map.gain_max - self.map.gain_min)
 
     def on_intent(self, event: IntentEvent) -> None:
         handler = getattr(self, f"_on_{event.intent.name.lower()}", None)
         if handler:
             handler(event)
 
-    # --- engagement ---------------------------------------------------------
+    # --- clutch: the ratchet ------------------------------------------------
 
-    def _on_engage(self, event: IntentEvent) -> None:
-        # Re-engaging should not fling the cursor across the screen from wherever
-        # it was left. Snap to the hand's current projection instead of gliding.
-        self._primed = False
+    def _on_clutch_down(self, event: IntentEvent) -> None:
+        """Anchor here. The cursor does NOT jump — that is the whole point."""
+        self._filter.reset()
+        self._last = None
+
+    def _on_clutch_up(self, event: IntentEvent) -> None:
+        self._last = None
 
     def _on_disengage(self, event: IntentEvent) -> None:
-        self._primed = False
+        self._last = None
 
     # --- pointer ------------------------------------------------------------
 
     def _on_point_move(self, event: IntentEvent) -> None:
-        tx, ty = self._project(event.frame)
-        if not self._primed:
-            self.x, self.y, self._primed = tx, ty, True
-        else:
-            a = self.map.smoothing
-            self.x += (tx - self.x) * a
-            self.y += (ty - self.y) * a
+        frame = event.frame
+        p = frame.position
+        fx, _fy, fz = self._filter(p.x, p.y, p.z, frame.timestamp / 1e6)
+
+        if self._last is None:              # first frame of this clutch: anchor only
+            self._last = (fx, fz)
+            return
+
+        dx_mm, dz_mm = fx - self._last[0], fz - self._last[1]
+        self._last = (fx, fz)
+
+        if abs(dx_mm) < self.map.deadzone_mm and abs(dz_mm) < self.map.deadzone_mm:
+            return                          # resting-hand tremor, not intent
+
+        v = frame.palm_velocity
+        gain = self._gain(math.hypot(v.x, v.z))
+        self.x = max(0.0, min(self.w - 1.0, self.x + dx_mm * gain))
+        self.y = max(0.0, min(self.h - 1.0, self.y + dz_mm * gain))
         self.backend.move(self.x, self.y)
 
     # --- buttons ------------------------------------------------------------
@@ -105,21 +143,17 @@ class DirectDriver:
         self.backend.scroll(event.data.get("dy", 0.0) * self.map.scroll_gain)
 
 
-# macOS virtual keycodes for the shortcuts the swipe gestures map to.
-_KEY_LEFT_ARROW, _KEY_RIGHT_ARROW, _KEY_TAB = 0x7B, 0x7C, 0x30
-
-
 class ShortcutDriver:
-    """Swipes -> system shortcuts. Separate from DirectDriver so pointer control and
-    discrete commands can be enabled independently."""
+    """Placeholder for discrete commands.
+
+    Previously mapped swipes to Spaces and the app switcher. Swipes are cut — the
+    motion leaves the tracking volume — so there is nothing to map yet. The next
+    discrete command should be a static pose held briefly, which cannot carry the
+    hand out of view. Kept so the wiring in cli.py stays honest about the gap.
+    """
 
     def __init__(self, backend: Backend):
         self.backend = backend
 
     def on_intent(self, event: IntentEvent) -> None:
-        if event.intent is Intent.SWIPE_LEFT:
-            self.backend.key(_KEY_LEFT_ARROW, ctrl=True)      # previous Space
-        elif event.intent is Intent.SWIPE_RIGHT:
-            self.backend.key(_KEY_RIGHT_ARROW, ctrl=True)     # next Space
-        elif event.intent is Intent.SWIPE_UP:
-            self.backend.key(_KEY_TAB, cmd=True)              # app switcher
+        return None

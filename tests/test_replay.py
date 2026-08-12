@@ -80,25 +80,19 @@ def test_fist_fires_grab_not_select(fired):
     assert Intent.SELECT_DOWN.value not in step
 
 
-def test_roaming_never_fires_a_swipe(fired):
-    """Roam peaks at 419 mm/s against a 600 threshold. This is the whole reason
-    swipes survived: the earlier analyzer compared the wrong statistics and
-    reported an overlap that does not exist."""
-    step = discrete(fired, "roam")
-    assert not any(k.startswith("swipe.") for k in step)
+def test_no_step_ever_fires_a_swipe(fired):
+    """Across all 3639 real frames, including 664 of deliberate swiping.
+    Swipes are cut; this pins that they stay cut."""
+    for step in ("hover", "roam", "pinch", "open", "fist", "two_finger", "swipe"):
+        fired_here = discrete(fired, step)
+        assert not any(k.startswith("swipe.") for k in fired_here), \
+            f"{step} fired a swipe"
 
 
-def test_swipe_step_fires_swipes(fired):
-    step = discrete(fired, "swipe")
-    assert any(k.startswith("swipe.") for k in step)
-
-
-def test_swipe_refractory_prevents_a_burst(fired):
-    """664 frames of swiping is roughly 6s of flicking — a handful of swipes,
-    not one per frame."""
-    step = discrete(fired, "swipe")
-    total = sum(v for k, v in step.items() if k.startswith("swipe."))
-    assert 1 <= total <= 15, f"expected a few swipes, got {total}"
+def test_clutch_engages_on_real_frames(fired):
+    """Palm-down is the neutral desk posture, so real pointing frames should
+    clutch without the user being told to hold anything."""
+    assert Intent.CLUTCH_DOWN.value in discrete(fired, "hover")
 
 
 def test_static_poses_are_quiet(fired):

@@ -11,11 +11,14 @@ Layers, bottom up. Each one only knows about the layer below it:
 from .actions import Backend, DryRunBackend, QuartzBackend, make_backend
 from .capture import HandFrame, LeapSource, Snapshot, Vec3, server_status
 from .driver import DirectDriver, Mapping, ShortcutDriver
-from .gestures import Config, GestureEngine, Intent, IntentEvent, Schmitt
+from .gestures import (Config, GestureEngine, Intent, IntentEvent, Schmitt,
+                       palm_down_degrees)
+from .oneeuro import OneEuro, OneEuroVec3
 
 __all__ = [
     "Backend", "DryRunBackend", "QuartzBackend", "make_backend",
     "HandFrame", "LeapSource", "Snapshot", "Vec3", "server_status",
     "DirectDriver", "Mapping", "ShortcutDriver",
     "Config", "GestureEngine", "Intent", "IntentEvent", "Schmitt",
+    "palm_down_degrees", "OneEuro", "OneEuroVec3",
 ]

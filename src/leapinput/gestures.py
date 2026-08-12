@@ -14,12 +14,25 @@ Two hard-won rules shape everything here:
 
 from __future__ import annotations
 
-import time
+import math
 from dataclasses import dataclass
 from enum import Enum
 from typing import Callable, Optional
 
 from .capture import HandFrame, Snapshot
+
+
+def palm_down_degrees(frame: HandFrame) -> float:
+    """Angle between the palm normal and straight down, in degrees.
+
+    0 deg = flat palm-down (the neutral resting posture); 90 deg = palm vertical.
+    The normal points out of the palm, so palm-down is normal.y == -1.
+    """
+    n = frame.palm_normal
+    mag = math.sqrt(n.x * n.x + n.y * n.y + n.z * n.z)
+    if mag == 0.0:
+        return 180.0                    # unusable normal: treat as clutch-off
+    return math.degrees(math.acos(max(-1.0, min(1.0, -n.y / mag))))
 
 
 class Intent(str, Enum):
@@ -28,12 +41,21 @@ class Intent(str, Enum):
 
     ENGAGE = "engage"
     DISENGAGE = "disengage"
+    CLUTCH_DOWN = "clutch.down"     # pointer starts moving, anchored here
+    CLUTCH_UP = "clutch.up"         # pointer parks; hand free to reposition
     POINT_MOVE = "point.move"
     SELECT_DOWN = "select.down"
     SELECT_UP = "select.up"
     GRAB_DOWN = "grab.down"
     GRAB_UP = "grab.up"
     SCROLL = "scroll"
+
+    # Swipes are CUT. Measured 2026-08-12: velocity separation is real (roam peaks
+    # at 419 mm/s, a swipe at 803) but irrelevant, because the swipe motion carries
+    # the hand out of the tracking volume and trips the dead-man's switch. A live
+    # 60s session fired swipe.right and swipe.down unintentionally, and swipe.down
+    # landed immediately before a disengage — the gesture destroying the tracking it
+    # depends on. Kept as names only so recorded sessions still decode.
     SWIPE_LEFT = "swipe.left"
     SWIPE_RIGHT = "swipe.right"
     SWIPE_UP = "swipe.up"
@@ -127,11 +149,20 @@ class Config:
     grab_off: float = 0.35
     grab_dwell: float = 0.06
 
-    # Swipe = peak palm speed. Roaming tops out at 419 mm/s; a swipe peaks at
-    # 803 mm/s (p95). 600 sits in the 384 mm/s of headroom between them, so normal
-    # pointing cannot reach it. The refractory makes one flick fire once.
-    swipe_speed: float = 600.0
-    swipe_refractory: float = 0.6
+    # Clutch = palm rotation, the ratchet that makes relative pointing possible.
+    #
+    # Palm-down (normal within 30 deg of straight down) is the neutral hand-on-desk
+    # posture, so holding it costs nothing. Rotate the palm toward vertical, like
+    # turning a doorknob, and the pointer parks while you reposition.
+    #
+    # Deliberately DIGIT-DISJOINT from every click pose: a clutch that needs
+    # specific fingers gets broken by the click it is supposed to survive. It also
+    # avoids ring/pinky extension entirely — the least reliable booleans this v1
+    # sensor produces palm-down.
+    clutch_on_deg: float = 30.0
+    clutch_off_deg: float = 45.0
+    clutch_dwell: float = 0.045     # ~5 frames at 110fps
+    clutch_release_dwell: float = 0.072
 
     # Scroll: two fingers extended, vertical palm motion.
     scroll_gain: float = 0.35
@@ -145,6 +176,9 @@ class GestureEngine:
         self.engaged = Schmitt(self.cfg.engage_y, self.cfg.release_y, self.cfg.engage_dwell)
         self.pinch = Schmitt(self.cfg.pinch_on_mm, self.cfg.pinch_off_mm, self.cfg.pinch_dwell)
         self.grab = Schmitt(self.cfg.grab_on, self.cfg.grab_off, self.cfg.grab_dwell)
+        # on_at < off_at: a SMALL angle means palm-down means engaged.
+        self.clutch = Schmitt(self.cfg.clutch_on_deg, self.cfg.clutch_off_deg,
+                              self.cfg.clutch_dwell)
         # "no swipe has ever happened" — not 0.0, which reads as "a swipe just
         # happened at t=0" and silently suppresses every swipe until the refractory
         # elapses. Invisible against real sensor timestamps (large microsecond
@@ -180,6 +214,8 @@ class GestureEngine:
             self._emit(Intent.SELECT_UP, frame)
         if self.grab.force_off():
             self._emit(Intent.GRAB_UP, frame)
+        if self.clutch.force_off():
+            self._emit(Intent.CLUTCH_UP, frame)
 
     def on_snapshot(self, snap: Snapshot) -> None:
         frame = snap.get(self.cfg.hand)
@@ -203,7 +239,16 @@ class GestureEngine:
         if not self.engaged.state:
             return
 
-        self._emit(Intent.POINT_MOVE, frame)
+        # The clutch decides whether the pointer moves at all. Palm angle is
+        # independent of every finger, so clicking never breaks it.
+        edge = self.clutch.update(palm_down_degrees(frame), now)
+        if edge is True:
+            self._emit(Intent.CLUTCH_DOWN, frame)
+        elif edge is False:
+            self._emit(Intent.CLUTCH_UP, frame)
+
+        if self.clutch.state:
+            self._emit(Intent.POINT_MOVE, frame)
 
         # Pinch to select. Guarded on the index finger actually being involved:
         # a closed fist collapses pinch_distance too, and that should read as grab.
@@ -222,7 +267,6 @@ class GestureEngine:
                 self._emit(Intent.GRAB_UP, frame)
 
         self._maybe_scroll(frame)
-        self._maybe_swipe(frame, now)
 
     def _maybe_scroll(self, frame: HandFrame) -> None:
         # Index + middle extended, others curled: a deliberate, distinctive pose.
@@ -233,17 +277,3 @@ class GestureEngine:
             if abs(dy) > 1.0:
                 self._emit(Intent.SCROLL, frame, dy=dy)
 
-    def _maybe_swipe(self, frame: HandFrame, now: float) -> None:
-        if self.pinch.state or self.grab.state:
-            return                      # a swipe during a drag is a drag, not a swipe
-        if now - self._last_swipe < self.cfg.swipe_refractory:
-            return
-        v = frame.palm_velocity
-        if abs(v.x) > self.cfg.swipe_speed and abs(v.x) > abs(v.z) * 1.6:
-            self._last_swipe = now
-            self._emit(Intent.SWIPE_RIGHT if v.x > 0 else Intent.SWIPE_LEFT, frame,
-                       speed=v.x)
-        elif abs(v.z) > self.cfg.swipe_speed and abs(v.z) > abs(v.x) * 1.6:
-            self._last_swipe = now
-            self._emit(Intent.SWIPE_DOWN if v.z > 0 else Intent.SWIPE_UP, frame,
-                       speed=v.z)

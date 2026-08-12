@@ -9,7 +9,8 @@ import dataclasses
 import pytest
 
 from leapinput.capture import HandFrame, Snapshot, Vec3
-from leapinput.gestures import Config, GestureEngine, Intent, Schmitt
+from leapinput.gestures import (Config, GestureEngine, Intent, Schmitt,
+                                palm_down_degrees)
 
 ORIGIN = Vec3(0.0, 0.0, 0.0)
 
@@ -136,18 +137,60 @@ def test_fist_reads_as_grab_not_pinch():
     assert Intent.GRAB_DOWN in seen
 
 
-def test_swipe_fires_once_then_respects_refractory():
-    engine = GestureEngine(Config(engage_dwell=0.0, swipe_refractory=10.0))
+def test_fast_motion_never_fires_a_swipe():
+    """Swipes are cut: the motion carries the hand out of the tracking volume,
+    so the gesture destroys the tracking it depends on. A live session fired
+    swipe.right and swipe.down unintentionally."""
+    engine = GestureEngine(Config(engage_dwell=0.0))
     fast = frame(palm_velocity=Vec3(900.0, 0.0, 0.0))
     seen = drive(engine, [frame(), fast, fast, fast])
-    assert seen.count(Intent.SWIPE_RIGHT) == 1
+    assert not any(str(i).startswith("Intent.SWIPE") for i in seen)
 
 
-def test_swipe_suppressed_during_a_drag():
-    engine = GestureEngine(Config(engage_dwell=0.0, pinch_dwell=0.0))
-    dragging = frame(pinch_distance=10.0, palm_velocity=Vec3(900.0, 0.0, 0.0))
-    seen = drive(engine, [frame(), dragging])
-    assert Intent.SWIPE_RIGHT not in seen
+# --- clutch ------------------------------------------------------------------
+
+PALM_DOWN = Vec3(0.0, -1.0, 0.0)
+PALM_SIDE = Vec3(1.0, 0.0, 0.0)
+
+
+def test_palm_down_is_zero_degrees():
+    assert palm_down_degrees(frame(palm_normal=PALM_DOWN)) == pytest.approx(0.0)
+    assert palm_down_degrees(frame(palm_normal=PALM_SIDE)) == pytest.approx(90.0)
+
+
+def test_clutch_engages_palm_down_and_releases_on_rotation():
+    engine = GestureEngine(Config(engage_dwell=0.0, clutch_dwell=0.0))
+    seen = drive(engine, [frame(palm_normal=PALM_DOWN),
+                          frame(palm_normal=PALM_SIDE)])
+    assert Intent.CLUTCH_DOWN in seen and Intent.CLUTCH_UP in seen
+
+
+def test_pointer_does_not_move_without_the_clutch():
+    """The ratchet: rotate the palm away and the cursor parks."""
+    engine = GestureEngine(Config(engage_dwell=0.0, clutch_dwell=0.0))
+    seen = []
+    engine.subscribe(lambda e: seen.append(e.intent))
+    for _ in range(5):
+        engine.on_snapshot(Snapshot(right=frame(palm_normal=PALM_SIDE)))
+    assert Intent.POINT_MOVE not in seen
+
+
+def test_clicking_does_not_break_the_clutch():
+    """Digit-disjoint by construction — a clutch that shares fingers with the
+    click gets broken by every click it is meant to survive."""
+    engine = GestureEngine(Config(engage_dwell=0.0, clutch_dwell=0.0,
+                                  pinch_dwell=0.0))
+    seen = drive(engine, [frame(palm_normal=PALM_DOWN),
+                          frame(palm_normal=PALM_DOWN, pinch_distance=10.0),
+                          frame(palm_normal=PALM_DOWN, pinch_distance=10.0)])
+    assert Intent.SELECT_DOWN in seen
+    assert Intent.CLUTCH_UP not in seen
+
+
+def test_tracking_loss_releases_the_clutch():
+    engine = GestureEngine(Config(engage_dwell=0.0, clutch_dwell=0.0))
+    seen = drive(engine, [frame(palm_normal=PALM_DOWN), None])
+    assert seen.index(Intent.CLUTCH_UP) < seen.index(Intent.DISENGAGE)
 
 
 def test_scroll_requires_the_two_finger_pose():

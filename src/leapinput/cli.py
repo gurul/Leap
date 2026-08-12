@@ -10,6 +10,7 @@ from . import (
     Config, DirectDriver, GestureEngine, Intent, LeapSource, Mapping,
     ShortcutDriver, Snapshot, make_backend, server_status,
 )
+from .guard import Guard
 
 
 def main(argv=None) -> int:
@@ -62,6 +63,11 @@ def main(argv=None) -> int:
             print(f"  auto-stops after {args.duration:.0f}s")
     print(f"\nRaise your {args.hand.lower()} hand above the device to engage.")
 
+    # The guard is a separate process holding the other end of a pipe. If this
+    # process dies in any way — including SIGKILL, which no finally: survives — the
+    # pipe closes and the guard releases every mouse button.
+    guard = Guard().start() if args.backend == "quartz" else None
+
     deadline = time.monotonic() + args.duration if args.duration else None
     with source.open():
         try:
@@ -74,6 +80,8 @@ def main(argv=None) -> int:
             # Never exit holding a button — that would strand the mouse down and
             # leave the machine selecting everything the user touches.
             engine.on_snapshot(Snapshot())
+            if guard:
+                guard.stop()
     print(f"{source.frames} frames")
     return 0
 
