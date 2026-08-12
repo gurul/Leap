@@ -93,7 +93,7 @@ def main(argv=None) -> int:
             print("  on it. Raise/lower to move up/down; height is the cursor axis.")
         else:
             print("  Hold your hand FLAT over the device, palm down.")
-        print("  pinch = click   fist+move = scroll   turn palm away = park cursor")
+        print("  1 finger = move    fist = click/drag    2+ fingers = lift (park)")
         if args.duration:
             print(f"  auto-stops after {args.duration:.0f}s")
     print(f"\nRaise your {args.hand.lower()} hand above the device to engage.")
@@ -106,6 +106,10 @@ def main(argv=None) -> int:
     def warn_if_stuck() -> None:
         seen = source.latest.get(args.hand)
         if seen is None or engine.clutch.state or not gesture_cfg.clutch_enabled:
+            return
+        if gesture_cfg.clutch_mode == "fingers":
+            print(f"\n  cursor is parked: {engine.fingers.value} fingers extended.")
+            print("  point with ONE finger to move it; 2+ means the mouse is lifted.\n")
             return
         angle = engine.last_clutch_angle
         if angle is None:

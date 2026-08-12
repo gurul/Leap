@@ -248,7 +248,13 @@ class Config:
     # the way pose-based scroll collided with pose-based pointing.
     clutch_mode: str = "fingers"    # "fingers" | "palm"
     lift_at_fingers: int = 2        # this many extended = mouse lifted
-    finger_hold: float = 0.08       # debounce; ~9 frames at 110fps
+
+    # ASYMMETRIC debounce. Engaging is cheap and should feel instant; LIFTING
+    # interrupts what you are doing, so it must be deliberate. A symmetric 80ms
+    # window produced ~28 clutch cycles in one 60s session, because finger count
+    # flaps between 1 and 2 while pointing and either direction was equally easy.
+    finger_hold: float = 0.05       # engage: ~6 frames at 110fps
+    finger_lift_hold: float = 0.25  # lift: ~28 frames — a deliberate open hand
 
     # Clutch = palm rotation, the ratchet that makes relative pointing possible.
     #
@@ -410,8 +416,8 @@ class GestureEngine:
                        settle=self._settle_factor(frame))
 
         if self.cfg.clutch_mode == "fingers":
-            self._maybe_scroll(frame)
-            return                      # the ladder already drove grab and clutch
+            return      # the ladder drove clutch and grab; a fist is a DRAG, not
+                        # a scroll. One pose must not carry two meanings.
 
         # Buttons only exist while the clutch is held. Releasing the clutch is the
         # equivalent of lifting a mouse — pressing its button mid-air does nothing.
@@ -444,6 +450,10 @@ class GestureEngine:
 
     def _update_finger_ladder(self, frame: HandFrame, now: float) -> None:
         """One signal drives clutch and grab, so they cannot contradict."""
+        # Hold longer to lift than to engage: lifting interrupts the user.
+        self.fingers.hold = (self.cfg.finger_lift_hold
+                             if frame.extended_count >= self.cfg.lift_at_fingers
+                             else self.cfg.finger_hold)
         self.fingers.update(frame.extended_count, now)
         count = self.fingers.value
 
@@ -460,9 +470,13 @@ class GestureEngine:
         if not self.clutch.state:
             return
 
-        # A fist is the button. grab_strength was >0.5 on 100% of fist frames and
-        # 0% of every other pose, so it is the most reliable signal available here.
-        fisted = count == 0 and frame.grab_strength >= self.cfg.grab_on
+        # A fist is the button, and it is driven by the DEBOUNCED finger count
+        # alone. Gating it additionally on a raw grab_strength threshold gave the
+        # button no hysteresis at all, so a momentary dip dropped it mid-drag —
+        # the live log shows grab.down/grab.up pairs firing repeatedly.
+        # count == 0 was 100% accurate across 444 real fist frames, so it is
+        # sufficient on its own.
+        fisted = count == 0
         if fisted and not self.grab.state:
             self.grab.state = True
             self._emit(Intent.GRAB_DOWN, frame)

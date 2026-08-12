@@ -143,15 +143,37 @@ def test_real_open_hand_frames_lift_the_mouse(ladder_fired):
 def test_real_two_finger_frames_lift_the_mouse(ladder_fired):
     """554 frames at exactly 2 extended — the lift threshold.
 
-    A handful of moves survive the debounce window (~9 frames at 110fps) before
-    the lift is confirmed. That is the hysteresis working, not a leak: the bound
-    is what matters, so assert the cursor stops rather than that it never moved.
+    Moves survive the lift debounce (0.25s = ~28 frames at 110fps) before the
+    lift is confirmed. That window is deliberately long: lifting interrupts the
+    user, so it must be a deliberate open hand rather than a flicker. Assert the
+    cursor stops, not that it never moved.
     """
     step = ladder_fired.get("two_finger", {})
     assert step.get(Intent.CLUTCH_UP.value, 0) >= 1
-    assert step.get(Intent.POINT_MOVE.value, 0) < 20, "cursor kept moving while lifted"
+    assert step.get(Intent.POINT_MOVE.value, 0) <= 35, "cursor kept moving while lifted"
 
 
 def test_real_pinch_frames_never_click(ladder_fired):
     """A deliberate pinch reads as 3 extended fingers on this hardware."""
     assert Intent.SELECT_DOWN.value not in discrete(ladder_fired, "pinch")
+
+
+def test_a_real_fist_holds_the_button(ladder_fired):
+    """The bug: gating the button on a raw grab_strength threshold gave it no
+    hysteresis, so a momentary dip dropped it mid-drag — the live log shows
+    grab.down/grab.up pairs firing repeatedly. Across 444 real fist frames the
+    button must go down once and stay down."""
+    step = ladder_fired.get("fist", {})
+    assert step.get(Intent.GRAB_DOWN.value, 0) == 1
+    assert step.get(Intent.GRAB_UP.value, 0) == 0
+
+
+def test_a_fist_still_moves_the_cursor(ladder_fired):
+    """A fist is a DRAG, so the cursor must keep tracking while it is held."""
+    assert ladder_fired.get("fist", {}).get(Intent.POINT_MOVE.value, 0) > 300
+
+
+def test_a_fist_does_not_also_scroll(ladder_fired):
+    """One pose, one meaning. A fist carrying both drag and scroll is what
+    produced 447 scroll events in a single session."""
+    assert Intent.SCROLL.value not in discrete(ladder_fired, "fist")

@@ -336,7 +336,7 @@ def ladder(engine, counts):
     t = 0
     for n in counts:
         ext = tuple(i < n for i in range(5))
-        for _ in range(14):            # hold long enough to clear the debounce
+        for _ in range(40):            # clear even the 0.25s lift debounce
             t += 9000
             engine.on_snapshot(Snapshot(right=frame(
                 timestamp=t, extended=ext,
