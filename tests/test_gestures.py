@@ -348,13 +348,21 @@ def cfg_fingers(**kw):
     return Config(plane="xz", clutch_mode="fingers", engage_dwell=0.0, **kw)
 
 
-def test_two_or_more_fingers_lifts_the_mouse():
-    seen = ladder(GestureEngine(cfg_fingers()), [1, 3])
+def test_an_open_hand_lifts_the_mouse():
+    """Four or more fingers, because a pinch reads as three."""
+    seen = ladder(GestureEngine(cfg_fingers()), [1, 5])
     assert seen[-1] is Intent.CLUTCH_UP
 
 
+def test_three_fingers_do_not_lift_the_mouse():
+    """A pinch is 3 extended; lifting there would park the cursor at the exact
+    moment of the click."""
+    seen = ladder(GestureEngine(cfg_fingers()), [1, 3])
+    assert Intent.CLUTCH_UP not in seen
+
+
 def test_one_finger_engages_the_cursor():
-    seen = ladder(GestureEngine(cfg_fingers()), [3, 1])
+    seen = ladder(GestureEngine(cfg_fingers()), [5, 1])
     assert Intent.CLUTCH_DOWN in seen
 
 
@@ -368,7 +376,7 @@ def test_fist_grabs_while_still_engaged():
 
 def test_lifting_releases_a_held_grab():
     """Opening the hand mid-drag must drop the button before parking."""
-    seen = ladder(GestureEngine(cfg_fingers()), [0, 4])
+    seen = ladder(GestureEngine(cfg_fingers()), [0, 5])
     assert seen.index(Intent.GRAB_UP) < seen.index(Intent.CLUTCH_UP)
 
 

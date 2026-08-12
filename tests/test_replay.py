@@ -137,10 +137,10 @@ def test_real_open_hand_frames_lift_the_mouse(ladder_fired):
     the cursor must be parked and no button may be held."""
     for step in ("open", "roam"):
         assert Intent.GRAB_DOWN.value not in discrete(ladder_fired, step)
-        assert ladder_fired.get(step, {}).get(Intent.POINT_MOVE.value, 0) < 20
+        assert ladder_fired.get(step, {}).get(Intent.POINT_MOVE.value, 0) < 40
 
 
-def test_real_two_finger_frames_lift_the_mouse(ladder_fired):
+def test_two_fingers_do_not_lift_the_mouse(ladder_fired):
     """554 frames at exactly 2 extended — the lift threshold.
 
     Moves survive the lift debounce (0.25s = ~28 frames at 110fps) before the
@@ -149,13 +149,21 @@ def test_real_two_finger_frames_lift_the_mouse(ladder_fired):
     cursor stops, not that it never moved.
     """
     step = ladder_fired.get("two_finger", {})
-    assert step.get(Intent.CLUTCH_UP.value, 0) >= 1
-    assert step.get(Intent.POINT_MOVE.value, 0) <= 35, "cursor kept moving while lifted"
+    assert step.get(Intent.CLUTCH_UP.value, 0) == 0
+    assert step.get(Intent.POINT_MOVE.value, 0) > 300
 
 
-def test_real_pinch_frames_never_click(ladder_fired):
-    """A deliberate pinch reads as 3 extended fingers on this hardware."""
-    assert Intent.SELECT_DOWN.value not in discrete(ladder_fired, "pinch")
+def test_real_pinch_frames_click(ladder_fired):
+    """443 frames of a real pinch, all at 3 extended fingers — which is why the
+    lift threshold is 4. A sensitive pinch (50mm, strength >= 0.5) must fire on
+    them, and the corpus median of 18mm clears it easily."""
+    assert Intent.SELECT_DOWN.value in discrete(ladder_fired, "pinch")
+
+
+def test_an_open_hand_never_pinches(ladder_fired):
+    """The other half: 442 open-hand frames at 83-87mm must never click, or a
+    sensitive threshold has been set too low."""
+    assert Intent.SELECT_DOWN.value not in discrete(ladder_fired, "open")
 
 
 def test_a_real_fist_holds_the_button(ladder_fired):

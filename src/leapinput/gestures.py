@@ -207,9 +207,18 @@ class Config:
     # Select = thumb/index pinch, measured in mm rather than pinch_strength: on a v1
     # controller the strength curve is coarse, but the distance separation is huge —
     # pinched 17-18mm vs open 83-87mm, a 65mm gap. These sit well inside it.
-    pinch_on_mm: float = 35.0
-    pinch_off_mm: float = 60.0
-    pinch_dwell: float = 0.04
+    # SENSITIVE pinch — fires on intent, not on a perfect gesture.
+    #
+    # Measured separation is wide: pinched 17-18mm vs open 83-87mm, a 65mm gap.
+    # Firing at 50mm sits in the middle of that gap, so a light, partial pinch
+    # registers while an open hand still cannot reach it. pinch_strength only has
+    # to clear 0.5, enough to reject a hand that is merely closing rather than
+    # pinching, without demanding the model be confident at the moment thumb and
+    # index occlude — which is exactly when it is least confident.
+    pinch_on_mm: float = 50.0
+    pinch_off_mm: float = 68.0
+    pinch_dwell: float = 0.03
+    pinch_min_strength: float = 0.50
 
     # Cursor stabilisation while a click is forming.
     #
@@ -247,7 +256,14 @@ class Config:
     # It is also one signal for the whole vocabulary, so the states cannot collide
     # the way pose-based scroll collided with pose-based pointing.
     clutch_mode: str = "fingers"    # "fingers" | "palm"
-    lift_at_fingers: int = 2        # this many extended = mouse lifted
+    # 4, not 2: a deliberate pinch reads as THREE extended fingers on this
+    # hardware (100% of 443 corpus frames), so a lower threshold would lift the
+    # mouse at the exact moment the user is trying to click. Lifting is now an
+    # unmistakable open hand.
+    #   0 fist        -> grab / drag
+    #   1-3           -> engaged; pinch within this range clicks
+    #   4-5 open hand -> lifted
+    lift_at_fingers: int = 4
 
     # ASYMMETRIC debounce. Engaging is cheap and should feel instant; LIFTING
     # interrupts what you are doing, so it must be deliberate. A symmetric 80ms
@@ -416,8 +432,9 @@ class GestureEngine:
                        settle=self._settle_factor(frame))
 
         if self.cfg.clutch_mode == "fingers":
-            return      # the ladder drove clutch and grab; a fist is a DRAG, not
-                        # a scroll. One pose must not carry two meanings.
+            if self.clutch.state and not self.grab.state:
+                self._update_pinch(frame, now)
+            return      # a fist is a DRAG, not a scroll: one pose, one meaning.
 
         # Buttons only exist while the clutch is held. Releasing the clutch is the
         # equivalent of lifting a mouse — pressing its button mid-air does nothing.
@@ -459,6 +476,8 @@ class GestureEngine:
 
         lifted = count >= self.cfg.lift_at_fingers
         if lifted and self.clutch.state:
+            if self.pinch.force_off():
+                self._emit(Intent.SELECT_UP, frame)
             if self.grab.force_off():
                 self._emit(Intent.GRAB_UP, frame)
             self.clutch.state = False
@@ -483,6 +502,18 @@ class GestureEngine:
         elif not fisted and self.grab.state:
             self.grab.state = False
             self._emit(Intent.GRAB_UP, frame)
+
+    def _update_pinch(self, frame: HandFrame, now: float) -> None:
+        """Click on a high-confidence pinch: distance AND strength must agree."""
+        confident = frame.pinch_strength >= self.cfg.pinch_min_strength
+        # Feed the Schmitt a value it will reject unless the corroborating signal
+        # agrees, so hysteresis still governs the transition.
+        value = frame.pinch_distance if confident else self.cfg.pinch_off_mm + 1.0
+        edge = self.pinch.update(value, now)
+        if edge is True:
+            self._emit(Intent.SELECT_DOWN, frame)
+        elif edge is False:
+            self._emit(Intent.SELECT_UP, frame)
 
     def _settle_factor(self, frame: HandFrame) -> float:
         """1.0 = move freely, 0.0 = frozen. Ramps as a pinch closes."""
