@@ -142,9 +142,15 @@ class Config:
     hand: str = "Right"
 
     # Which plane the hand works in. "xz" = flat over the device (top-down);
-    # "xy" = upright, as if drawing on a vertical screen. This is not only a
-    # driver concern: it moves the clutch reference and the height floor too.
-    plane: str = "xy"
+    # "xy" = upright, as if drawing on a vertical screen.
+    #
+    # xz is the DEFAULT because it is the posture the sensor sees best: the device
+    # looks up from the desk, so a flat palm presents its full area while an
+    # upright hand is nearly edge-on. Making xy the default silently broke a
+    # working setup — held flat out of habit, the palm sits 90 deg off the
+    # palm-forward clutch reference, so the clutch never engages and the cursor
+    # never moves at all. xy stays available via --plane xy.
+    plane: str = "xz"
 
     # Height is a SANITY FLOOR, not the engagement gate.
     #

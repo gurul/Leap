@@ -77,10 +77,10 @@ class Mapping:
     invert_x: bool = True       # confirmed by use 2026-08-12
     invert_z: bool = False      # applies to the vertical axis in both planes
 
-    # "xy" = upright hand on a vertical plane (raise the hand, the cursor rises).
-    # "xz" = hand flat over the device, top-down. Must match Config.plane, which
-    # also moves the clutch reference and the engagement floor.
-    plane: str = "xy"
+    # "xz" (default) = hand flat over the device, top-down — the posture the
+    # sensor tracks best. "xy" = upright hand on a vertical plane. Must match
+    # Config.plane, which also moves the clutch reference and engagement floor.
+    plane: str = "xz"
 
     # Which point the cursor follows: "index" | "knuckles" | "palm".
     #
