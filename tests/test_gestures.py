@@ -214,18 +214,47 @@ def test_scroll_requires_a_fist():
                      extended=(False, True, True, False, False))
     assert Intent.SCROLL not in drive(engine, [frame(), pointing])
 
-    engine = GestureEngine(Config(plane="xz", **cfg))
-    fist_moving = frame(palm_velocity=Vec3(0.0, 0.0, 50.0), grab_strength=0.95,
-                        extended=(False,) * 5)
-    assert Intent.SCROLL in drive(engine, [frame(), fist_moving])
+    engine = GestureEngine(Config(plane="xz", scroll_interval=0.0, **cfg))
+    fist = lambda z: frame(palm=Vec3(0.0, 150.0, z), grab_strength=0.95,
+                           extended=(False,) * 5)
+    # Position control: the fist must TRAVEL, not merely be held.
+    assert Intent.SCROLL in drive(engine, [frame(), fist(0.0), fist(10.0), fist(20.0)])
 
 
-def test_a_still_fist_does_not_scroll():
-    """Holding a fist to grab must not emit scroll from tremor alone."""
-    engine = GestureEngine(Config(plane="xz", engage_dwell=0.0, clutch_dwell=0.0, grab_dwell=0.0))
-    still_fist = frame(grab_strength=0.95, extended=(False,) * 5,
-                       palm_velocity=Vec3(0.0, 0.0, 3.0))
-    assert Intent.SCROLL not in drive(engine, [frame(), still_fist])
+def test_a_held_still_fist_does_not_scroll():
+    """The runaway: rate control kept scrolling for as long as the fist was held,
+    measured at ~7700 px/sec. Position control stops when the hand stops."""
+    engine = GestureEngine(Config(plane="xz", engage_dwell=0.0, clutch_dwell=0.0,
+                                  grab_dwell=0.0, scroll_interval=0.0))
+    still = frame(palm=Vec3(0.0, 150.0, 0.0), grab_strength=0.95,
+                  extended=(False,) * 5)
+    assert Intent.SCROLL not in drive(engine, [frame()] + [still] * 40)
+
+
+def test_scroll_is_bounded_by_hand_travel():
+    """Total scroll must be proportional to distance moved, not to time held."""
+    engine = GestureEngine(Config(plane="xz", engage_dwell=0.0, clutch_dwell=0.0,
+                                  grab_dwell=0.0, scroll_interval=0.0))
+    seen = []
+    engine.subscribe(lambda e: seen.append(e))
+    fist = lambda z: frame(palm=Vec3(0.0, 150.0, z), grab_strength=0.95,
+                           extended=(False,) * 5)
+    frames = [frame()] + [fist(i * 0.5) for i in range(60)]   # 30mm of travel
+    drive(engine, frames)
+    total = sum(abs(e.data.get("dy", 0.0)) for e in seen if e.intent is Intent.SCROLL)
+    # 30mm at 3px/mm = ~90px, not the thousands rate control produced.
+    assert total <= 150.0, f"scrolled {total:.0f}px for 30mm of hand travel"
+
+
+def test_a_fist_cannot_also_latch_a_click():
+    """A fist collapses pinch_distance to ~15mm. The live log shows grab.down then
+    select.down with no release, leaving the button held through 400+ scrolls."""
+    engine = GestureEngine(Config(plane="xz", engage_dwell=0.0, clutch_dwell=0.0,
+                                  grab_dwell=0.0, pinch_dwell=0.0))
+    fist = frame(grab_strength=0.95, pinch_distance=15.0, extended=(False,) * 5)
+    seen = drive(engine, [frame(), fist, fist, fist])
+    assert Intent.GRAB_DOWN in seen
+    assert Intent.SELECT_DOWN not in seen
 
 
 def test_clicks_are_gated_on_the_clutch():

@@ -223,8 +223,15 @@ class Config:
     # index is the pointer, so scroll moves to the one channel that is perfectly
     # separable here: grab_strength was >0.5 on 100% of fist frames and 0% of every
     # other pose. Grab the page and drag it.
-    scroll_gain: float = 0.35
-    scroll_min_mm_s: float = 25.0   # ignore the tremor of simply holding a fist
+    # Scroll is POSITION control from the grab anchor, not rate control.
+    #
+    # Rate control (velocity -> scroll speed) emitted one event per frame at 110Hz;
+    # measured at ~7700 px/sec, roughly seven pages a second, and it kept scrolling
+    # for as long as the fist was held. Displacement control cannot run away: move
+    # the hand 10mm and the page moves a fixed amount, hold still and it stops.
+    scroll_gain: float = 3.0        # px of scroll per mm of hand travel
+    scroll_min_mm: float = 0.5      # ignore tremor while simply holding a fist
+    scroll_interval: float = 0.03   # emit at ~33Hz, not once per tracking frame
 
 
 class GestureEngine:
@@ -252,6 +259,8 @@ class GestureEngine:
         self._last_swipe = float("-inf")
         self._now = 0.0
         self.last_clutch_angle: Optional[float] = None
+        self._scroll_anchor: Optional[float] = None
+        self._scroll_emitted_at = 0.0
         self._subscribers: list[Callable[[IntentEvent], None]] = []
 
     def _clock(self, frame: Optional[HandFrame]) -> float:
@@ -342,9 +351,12 @@ class GestureEngine:
             self._release_buttons(frame)
             return
 
-        # Pinch to select. Guarded on the index finger actually being involved:
-        # a closed fist collapses pinch_distance too, and that should read as grab.
-        if frame.grab_strength < self.cfg.grab_on:
+        # Pinch to select. Guarded on the LATCHED grab state, not the instantaneous
+        # reading: a fist collapses pinch_distance to ~15mm, so a momentary dip in
+        # grab_strength was enough to latch a pinch on top of a grab. The live log
+        # shows grab.down then select.down with no release between them, leaving the
+        # mouse button held down through hundreds of scroll events.
+        if not self.grab.state and frame.grab_strength < self.cfg.grab_on:
             edge = self.pinch.update(frame.pinch_distance, now)
             if edge is True:
                 self._emit(Intent.SELECT_DOWN, frame)
@@ -362,8 +374,19 @@ class GestureEngine:
 
     def _maybe_scroll(self, frame: HandFrame) -> None:
         if not self.grab.state:
+            self._scroll_anchor = None
             return
-        if abs(frame.palm_velocity.z) < self.cfg.scroll_min_mm_s:
+        z = frame.position.z
+        if self._scroll_anchor is None:          # first frame of this grab
+            self._scroll_anchor = z
+            self._scroll_emitted_at = self._now
             return
-        self._emit(Intent.SCROLL, frame, dy=frame.palm_velocity.z * self.cfg.scroll_gain)
+        if self._now - self._scroll_emitted_at < self.cfg.scroll_interval:
+            return
+        travel = z - self._scroll_anchor
+        if abs(travel) < self.cfg.scroll_min_mm:
+            return
+        self._scroll_anchor = z                  # consume it; only NEW travel scrolls
+        self._scroll_emitted_at = self._now
+        self._emit(Intent.SCROLL, frame, dy=travel * self.cfg.scroll_gain)
 
