@@ -95,3 +95,26 @@ Do not re-propose these without strong new evidence.
 A verified end-to-end Python environment exists. Reproduce it with `scripts/setup.sh`. The smoke test
 `scripts/verify-env.sh` asserts: Hyperion version, device presence, frame throughput, and Accessibility
 permission.
+
+## Camera source (no Leap hardware)
+
+Measured on this machine, **2026-08-12**, `--source camera`:
+
+| | |
+|---|---|
+| Stack | mediapipe 1.0.0 (Tasks API only — `mp.solutions` is gone), opencv 5.0.0, CPython 3.12 |
+| Model | `vendor/hand_landmarker.task` (float16, 7.8 MB, fetched from Google's model bucket — see `camera.py:MODEL_URL`) |
+| Measured frame rate | **29.4 fps** at 640×480 (449 frames / 15.3 s), hand detected on 145/150 polls |
+| End-to-end | full vocabulary verified live: engage → clutch.down → select.down/up → clutch.up → disengage |
+
+Gotchas that cost time, so they are pinned here:
+
+1. **Handedness is swapped on a mirrored feed.** MediaPipe 1.0.0 labels handedness for the
+   *un-mirrored* image: a right hand read `"Left"` on **186/186 frames** of our selfie-view feed.
+   `camera.py` swaps the label; do not "fix" that swap without re-measuring.
+2. **mediapipe 1.x has no bundled model.** `HandLandmarker` needs the `.task` file downloaded
+   separately; the old `mp.solutions.hands` API (which bundled it) no longer exists.
+3. **Camera permission** must be granted to the terminal (System Settings → Privacy & Security →
+   Camera), or `cv2.VideoCapture(0)` opens nothing.
+4. The Leap SDK is now **optional**: `leapinput.capture` imports without `leap` installed and
+   raises only if `LeapSource`/`server_status` are actually used.

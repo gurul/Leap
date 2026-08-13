@@ -15,7 +15,13 @@ import threading
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
-import leap
+# Optional: this module defines the framework-free HandFrame/Snapshot types that
+# every capture source shares, so it must import on machines with no Leap SDK at
+# all (e.g. a camera-only setup driving leapinput.camera.CameraSource).
+try:
+    import leap
+except ImportError:          # no SDK — LeapSource/server_status raise if used
+    leap = None
 
 
 @dataclass(frozen=True)
@@ -146,17 +152,22 @@ class Snapshot:
         return self.right if side == "Right" else self.left
 
 
-class _Listener(leap.Listener):
-    def __init__(self, sink: Callable[[Snapshot], None]):
-        super().__init__()
-        self._sink = sink
+def _make_listener(sink: Callable[[Snapshot], None]):
+    """Build the leap.Listener subclass at call time, not import time.
 
-    def on_tracking_event(self, event):
-        snap = Snapshot()
-        for hand in event.hands:
-            frame = HandFrame.of(hand, event.tracking_frame_id, event.timestamp)
-            setattr(snap, frame.side.lower(), frame)
-        self._sink(snap)
+    Subclassing leap.Listener in the module body would make the whole module —
+    and the shared HandFrame types — unimportable without the SDK.
+    """
+
+    class _Listener(leap.Listener):
+        def on_tracking_event(self, event):
+            snap = Snapshot()
+            for hand in event.hands:
+                frame = HandFrame.of(hand, event.tracking_frame_id, event.timestamp)
+                setattr(snap, frame.side.lower(), frame)
+            sink(snap)
+
+    return _Listener()
 
 
 class LeapSource:
@@ -167,10 +178,14 @@ class LeapSource:
     """
 
     def __init__(self, mode=None):
+        if leap is None:
+            raise RuntimeError(
+                "the `leap` bindings are not installed — run scripts/setup.sh, "
+                "or use `--source camera` which needs no Leap hardware")
         self._mode = mode or leap.TrackingMode.Desktop
         self._subscribers: list[Callable[[Snapshot], None]] = []
         self._connection = leap.Connection()
-        self._connection.add_listener(_Listener(self._dispatch))
+        self._connection.add_listener(_make_listener(self._dispatch))
         self._lock = threading.Lock()
         self.latest = Snapshot()
         self.frames = 0
@@ -210,4 +225,8 @@ class _Session:
 
 def server_status(timeout_ms: int = 2000) -> dict:
     """Version + attached devices, without opening a tracking connection."""
+    if leap is None:
+        raise RuntimeError(
+            "the `leap` bindings are not installed — run scripts/setup.sh, "
+            "or use `--source camera` which needs no Leap hardware")
     return leap.get_server_status(timeout_ms)

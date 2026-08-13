@@ -15,6 +15,10 @@ leapinput = "leapinput.cli:main"
 
 [project.optional-dependencies]
 dev = ["pytest"]
+# --source camera: webcam hand tracking, no Leap hardware or SDK required.
+# mediapipe 1.x ships only the Tasks API; the model file is fetched separately
+# (see leapinput/camera.py MODEL_URL — scripts/setup.sh does it for you).
+camera = ["mediapipe"]
 
 [build-system]
 requires = ["setuptools>=68"]
