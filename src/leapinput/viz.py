@@ -115,7 +115,6 @@ def render(frame: Optional[HandFrame], target: Optional[tuple] = None,
         )
         engaged = (GREEN + "engaged" + RESET) if p.y > 90 else (YELLOW + "too low" + RESET)
         lines.append(f"  {BOLD}{frame.side.upper()}{RESET} hand   "
-                     f"{DIM}confidence{RESET} {frame.confidence:.2f}   "
                      f"{DIM}id{RESET} {frame.hand_id}   {engaged}")
         lines += _spatial(frame)
         # All three axes, same treatment. y is not a lesser dimension — it is the

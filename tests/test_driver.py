@@ -4,6 +4,8 @@ Both were invisible to every prior test because both need a real desk and a real
 second monitor to show up.
 """
 
+import dataclasses
+
 from leapinput.actions import DryRunBackend
 from leapinput.capture import HandFrame, Vec3
 from leapinput.driver import DirectDriver, Mapping
@@ -23,11 +25,11 @@ def frame(x, y, z, t_us, vx=0.0, vz=0.0) -> HandFrame:
     tips = tuple(Vec3(x + dx, y + 30.0, z - 60.0) for dx in (-20, -6, 4, 14, 24))
     knuckles = tuple(Vec3(x + dx, y + 10.0, z) for dx in (-20, -7, 7, 20))
     return HandFrame(
-        frame_id=1, timestamp=t_us, hand_id=1, side="Right", confidence=1.0,
-        palm=at, palm_stable=ORIGIN, palm_velocity=Vec3(vx, 0.0, vz),
-        palm_normal=Vec3(0.0, -1.0, 0.0), palm_direction=ORIGIN,
-        pinch_strength=0.0, pinch_distance=80.0, grab_strength=0.0, grab_angle=0.0,
-        extended=(True,) * 5, fingertips=tips, knuckles=knuckles,
+        frame_id=1, timestamp=t_us, hand_id=1, side="Right",
+        palm=at, palm_velocity=Vec3(vx, 0.0, vz),
+        palm_normal=Vec3(0.0, -1.0, 0.0),
+        pinch_strength=0.0, pinch_distance=80.0, grab_strength=0.0,
+        extended=(True,) * 5, index_tip=tips[1], knuckles=knuckles,
     )
 
 
@@ -141,14 +143,13 @@ def test_every_tracking_point_produces_motion():
 
 
 def test_knuckles_mode_ignores_finger_curl():
-    """The rigid alternative: same hand position, fingers curled to pinch."""
+    """The rigid alternative: moving the index tip must not move the cursor."""
     driver, _ = make(Mapping(plane="xz", tracking_point="knuckles"))
     a = frame(0, 150, 0, 0)
-    b = frame(0, 150, 0, 100_000)
-    curled = HandFrame(**{**b.__dict__, "fingertips": tuple(
-        Vec3(t.x - 25.0, t.y - 20.0, t.z + 30.0) for t in b.fingertips)})
+    curled = dataclasses.replace(frame(0, 150, 0, 100_000),
+                                 index_tip=Vec3(-25.0, 130.0, 30.0))
     drive(driver, [a, curled])
-    assert (driver.x, driver.y) == (a and driver.x, driver.y)   # no jump
+    assert (driver.x, driver.y) == (756.0, 491.0)
 
 
 # --- the upright (xy) plane -------------------------------------------------

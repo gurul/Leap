@@ -13,12 +13,12 @@ from .capture import HandFrame, LeapSource, Snapshot, Vec3, server_status
 from .driver import DirectDriver, Mapping, ShortcutDriver
 from .gestures import (Config, GestureEngine, Intent, IntentEvent, Schmitt,
                        palm_down_degrees)
-from .oneeuro import OneEuro, OneEuroVec3
+from .oneeuro import OneEuro, OneEuroPlane
 
 __all__ = [
     "Backend", "DryRunBackend", "QuartzBackend", "make_backend",
     "HandFrame", "LeapSource", "Snapshot", "Vec3", "server_status",
     "DirectDriver", "Mapping", "ShortcutDriver",
     "Config", "GestureEngine", "Intent", "IntentEvent", "Schmitt",
-    "palm_down_degrees", "OneEuro", "OneEuroVec3",
+    "palm_down_degrees", "OneEuro", "OneEuroPlane",
 ]

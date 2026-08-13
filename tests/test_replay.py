@@ -26,13 +26,12 @@ def rehydrate(row: dict) -> HandFrame:
 
     return HandFrame(
         frame_id=row["frame_id"], timestamp=row["timestamp"], hand_id=row["hand_id"],
-        side=row["side"], confidence=row["confidence"],
-        palm=vec("palm"), palm_stable=vec("palm_stable"),
+        side=row["side"],
+        palm=vec("palm"),
         palm_velocity=vec("palm_velocity"), palm_normal=vec("palm_normal"),
-        palm_direction=vec("palm_direction"),
         pinch_strength=row["pinch_strength"], pinch_distance=row["pinch_distance"],
-        grab_strength=row["grab_strength"], grab_angle=row["grab_angle"],
-        extended=tuple(row["extended"]), fingertips=(Vec3(0.0, 0.0, 0.0),) * 5,
+        grab_strength=row["grab_strength"],
+        extended=tuple(row["extended"]), 
     )
 
 

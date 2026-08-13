@@ -37,24 +37,17 @@ class HandFrame:
     timestamp: int              # microseconds, from the tracking service
     hand_id: int
     side: str                   # "Left" | "Right"
-    confidence: float
 
-    palm: Vec3                  # raw palm centre — the one to use, see `position`
-    palm_stable: Vec3           # Leap's stabilized palm. MEASURED AS ALWAYS (0,0,0) on
-                                # Hyperion 6.2 + v1 controller. Recorded so we notice if
-                                # a future release starts populating it. Do not consume
-                                # it directly — use `position`.
+    palm: Vec3                  # palm centre
     palm_velocity: Vec3         # mm/s
-    palm_normal: Vec3           # points out of the palm
-    palm_direction: Vec3        # points from palm toward the fingers
+    palm_normal: Vec3           # points out of the palm; palm-mode clutch only
 
     pinch_strength: float       # 0..1
     pinch_distance: float       # mm between thumb and index tips
-    grab_strength: float        # 0..1
-    grab_angle: float           # radians
+    grab_strength: float        # 0..1; palm-mode grab and pose validation
 
     extended: tuple[bool, ...]  # thumb, index, middle, ring, pinky
-    fingertips: tuple[Vec3, ...]
+    index_tip: Vec3 = None      # the default tracked point
     knuckles: tuple[Vec3, ...] = ()   # index..pinky MCP joints; see `center`
 
     @property
@@ -74,8 +67,8 @@ class HandFrame:
                      pose, so a pinch cannot drag the cursor. Less expressive.
         "palm"     — raw palm centroid. Drifts as fingers curl; kept for comparison.
         """
-        if kind == "index" and len(self.fingertips) > 1:
-            return self.fingertips[1]
+        if kind == "index" and self.index_tip is not None:
+            return self.index_tip
         if kind == "palm":
             return self.position
         return self.center
@@ -117,16 +110,7 @@ class HandFrame:
 
     @property
     def position(self) -> Vec3:
-        """Palm position, preferring Leap's stabilized value when it exists.
-
-        Hyperion 6.2 with a v1 controller reports `stabilized_position` as exactly
-        (0,0,0) on every frame — measured over 3050 frames on 2026-08-12. Consuming
-        it directly silently zeroes the engagement height and the cursor mapping.
-        This picks the raw palm in that case, and will pick up the stabilized value
-        for free if a later release starts filling it in.
-        """
-        s = self.palm_stable
-        return self.palm if (s.x == 0.0 and s.y == 0.0 and s.z == 0.0) else s
+        return self.palm
 
     @classmethod
     def of(cls, hand, frame_id: int, timestamp: int) -> "HandFrame":
@@ -136,20 +120,17 @@ class HandFrame:
             timestamp=timestamp,
             hand_id=hand.id,
             side=str(hand.type).split(".")[-1],
-            confidence=hand.confidence,
             palm=Vec3.of(hand.palm.position),
-            palm_stable=Vec3.of(hand.palm.stabilized_position),
             palm_velocity=Vec3.of(hand.palm.velocity),
             palm_normal=Vec3.of(hand.palm.normal),
-            palm_direction=Vec3.of(hand.palm.direction),
             pinch_strength=hand.pinch_strength,
             pinch_distance=hand.pinch_distance,
             grab_strength=hand.grab_strength,
-            grab_angle=hand.grab_angle,
             extended=tuple(bool(d.is_extended) for d in digits),
-            fingertips=tuple(Vec3.of(d.distal.next_joint) for d in digits),
-            # Index..pinky only: the thumb metacarpal is mobile and would reintroduce
-            # exactly the pose-dependent drift this is here to remove.
+            # Index fingertip only. It is the sole tracked point in normal use, and
+            # building the other four cost four Vec3 allocations per frame for
+            # nothing. `knuckles` mode reads the metacarpals lazily instead.
+            index_tip=Vec3.of(digits[1].distal.next_joint),
             knuckles=tuple(Vec3.of(d.metacarpal.next_joint) for d in digits[1:]),
         )
 

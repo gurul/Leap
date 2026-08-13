@@ -20,14 +20,14 @@ FRAME_US = 9_000          # ~110 fps, matching the real device
 
 def frame(**kw) -> HandFrame:
     base = dict(
-        frame_id=1, timestamp=0, hand_id=1, side="Right", confidence=1.0,
-        palm=Vec3(0.0, 150.0, 0.0), palm_stable=ORIGIN, palm_velocity=ORIGIN,
+        frame_id=1, timestamp=0, hand_id=1, side="Right",
+        palm=Vec3(0.0, 150.0, 0.0), palm_velocity=ORIGIN,
         # Palm-down by default: the clutch gates everything below it, so a
         # fixture without it silently tests a system that can never act.
-        palm_normal=Vec3(0.0, -1.0, 0.0), palm_direction=ORIGIN,
+        palm_normal=Vec3(0.0, -1.0, 0.0),
         pinch_strength=0.0, pinch_distance=80.0,
-        grab_strength=0.0, grab_angle=0.0,
-        extended=(True,) * 5, fingertips=(ORIGIN,) * 5,
+        grab_strength=0.0,
+        extended=(True,) * 5, 
     )
     base.update(kw)
     return HandFrame(**base)

@@ -62,10 +62,13 @@ PROTOCOL = [
 
 def _flatten(frame: HandFrame) -> dict:
     d = dataclasses.asdict(frame)
-    for key in ("palm", "palm_stable", "palm_velocity", "palm_normal", "palm_direction"):
+    for key in ("palm", "palm_velocity", "palm_normal"):
         v = d.pop(key)
         d[f"{key}_x"], d[f"{key}_y"], d[f"{key}_z"] = v["x"], v["y"], v["z"]
-    d.pop("fingertips", None)
+    tip = d.pop("index_tip", None)
+    if tip:
+        d["index_tip_x"], d["index_tip_y"], d["index_tip_z"] = tip["x"], tip["y"], tip["z"]
+    d.pop("knuckles", None)
     d["extended"] = list(d["extended"])
     return d
 

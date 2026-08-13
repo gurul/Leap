@@ -13,7 +13,7 @@ import sys
 from dataclasses import dataclass
 
 from .actions import Backend
-from .oneeuro import OneEuroVec3
+from .oneeuro import OneEuroPlane
 from .capture import HandFrame
 from .gestures import Intent, IntentEvent
 
@@ -145,7 +145,7 @@ class DirectDriver:
         # the main screen — measured here: the second display lives at (-541,-1440).
         self.min_x, self.min_y, self.max_x, self.max_y = backend.bounds
         self.x, self.y = self.w / 2.0, self.h / 2.0
-        self._filter = OneEuroVec3(freq=110.0, min_cutoff=1.0, beta=0.007)
+        self._filter = OneEuroPlane(freq=110.0, min_cutoff=1.0, beta=0.007)
         self._last: tuple[float, float] | None = None   # last filtered hand x/z
         self._warned: set[str] = set()
         self._button_down = False
@@ -202,13 +202,11 @@ class DirectDriver:
 
     def _on_point_move(self, event: IntentEvent) -> None:
         frame = event.frame
+        # Only the two plane axes are read, filtered or integrated. The off-plane
+        # axis gates (engage floor, edge guard) but never contributes to position.
         p = frame.track_point(self.map.tracking_point)
-        fx, fy, fz = self._filter(p.x, p.y, p.z, frame.timestamp / 1e6)
-
-        # In xy the vertical screen axis comes from hand HEIGHT, and it is negated
-        # because hand +y is up while CG screen +y is down: raise the hand, the
-        # cursor rises. In xz it comes from hand depth.
-        vertical = -fy if self.map.plane == "xy" else fz
+        raw_v = -p.y if self.map.plane == "xy" else p.z
+        fx, vertical = self._filter(p.x, raw_v, frame.timestamp / 1e6)
 
         if self._last is None:              # first frame of this clutch: anchor only
             self._last = (fx, vertical)

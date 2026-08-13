@@ -71,16 +71,21 @@ class OneEuro:
         return self._x(x, _alpha(cutoff, 1.0 / self.freq))
 
 
-class OneEuroVec3:
-    """Three independent 1€ filters sharing tuning. Upstream is scalar-only."""
+class OneEuroPlane:
+    """Two independent 1€ filters, one per plane axis. Upstream is scalar-only.
+
+    Two, not three, because the cursor lives on a 2D plane: the off-plane axis is
+    used for gating (engage floor, edge guard) and never for position, so
+    smoothing it is pure work with no observable effect.
+    """
 
     def __init__(self, **kw) -> None:
-        self.x, self.y, self.z = OneEuro(**kw), OneEuro(**kw), OneEuro(**kw)
+        self.a, self.b = OneEuro(**kw), OneEuro(**kw)
 
     def reset(self) -> None:
-        for f in (self.x, self.y, self.z):
-            f.reset()
+        self.a.reset()
+        self.b.reset()
 
-    def __call__(self, x: float, y: float, z: float,
-                 t: Optional[float] = None) -> tuple[float, float, float]:
-        return self.x(x, t), self.y(y, t), self.z(z, t)
+    def __call__(self, a: float, b: float,
+                 t: Optional[float] = None) -> tuple[float, float]:
+        return self.a(a, t), self.b(b, t)
