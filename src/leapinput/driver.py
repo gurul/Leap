@@ -148,6 +148,7 @@ class DirectDriver:
         self._filter = OneEuroVec3(freq=110.0, min_cutoff=1.0, beta=0.007)
         self._last: tuple[float, float] | None = None   # last filtered hand x/z
         self._warned: set[str] = set()
+        self._button_down = False
 
     def _gain(self, speed: float) -> float:
         lo, hi = self.map.speed_lo, self.map.speed_hi
@@ -195,6 +196,7 @@ class DirectDriver:
 
     def _on_disengage(self, event: IntentEvent) -> None:
         self._last = None
+        self._press(False)          # never disengage holding the button
 
     # --- pointer ------------------------------------------------------------
 
@@ -237,20 +239,33 @@ class DirectDriver:
 
     # --- buttons ------------------------------------------------------------
 
+    def _press(self, down: bool) -> None:
+        """Idempotent button state.
+
+        Select and grab are distinct intents that drive ONE physical button, so a
+        gesture passing through both would otherwise post down/down/up/up and
+        leave macOS confused about whether a drag is in progress. The driver owns
+        the truth about the button rather than trusting the intent stream.
+        """
+        if down == self._button_down:
+            return
+        self._button_down = down
+        (self.backend.down if down else self.backend.up)(self.x, self.y)
+
     def _on_select_down(self, event: IntentEvent) -> None:
-        self.backend.down(self.x, self.y)
+        self._press(True)
 
     def _on_select_up(self, event: IntentEvent) -> None:
-        self.backend.up(self.x, self.y)
+        self._press(False)
 
     # A fist IS the button in the finger-ladder vocabulary. These were missing
     # while the vocabulary moved off pinch, so the fist emitted grab.down into
     # nothing and the click silently did nothing at all.
     def _on_grab_down(self, event: IntentEvent) -> None:
-        self.backend.down(self.x, self.y)
+        self._press(True)
 
     def _on_grab_up(self, event: IntentEvent) -> None:
-        self.backend.up(self.x, self.y)
+        self._press(False)
 
     def _on_scroll(self, event: IntentEvent) -> None:
         self.backend.scroll(event.data.get("dy", 0.0) * self.map.scroll_gain)

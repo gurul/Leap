@@ -261,3 +261,32 @@ def test_deliberately_ignored_intents_stay_quiet(capsys):
     driver, _ = make()
     driver.on_intent(IntentEvent(Intent.ENGAGE, 0.0, None))
     assert capsys.readouterr().err == ""
+
+
+# --- one button, two intents -------------------------------------------------
+
+def test_a_pinch_closing_into_a_fist_is_one_click():
+    """The live nesting: select.down, grab.down, grab.up, select.up on a single
+    gesture. Pinch and fist are one continuum and drive ONE physical button, so
+    naive routing posts down/down/up/up and macOS loses track of the drag."""
+    driver, backend = make()
+    for intent in (Intent.SELECT_DOWN, Intent.GRAB_DOWN,
+                   Intent.GRAB_UP, Intent.SELECT_UP):
+        driver.on_intent(IntentEvent(intent, 0.0, None))
+    assert [c[0] for c in backend.calls] == ["down", "up"]
+
+
+def test_redundant_presses_are_idempotent():
+    driver, backend = make()
+    for _ in range(5):
+        driver.on_intent(IntentEvent(Intent.GRAB_DOWN, 0.0, None))
+    for _ in range(5):
+        driver.on_intent(IntentEvent(Intent.GRAB_UP, 0.0, None))
+    assert [c[0] for c in backend.calls] == ["down", "up"]
+
+
+def test_disengage_never_leaves_the_button_held():
+    driver, backend = make()
+    driver.on_intent(IntentEvent(Intent.GRAB_DOWN, 0.0, None))
+    driver.on_intent(IntentEvent(Intent.DISENGAGE, 0.0, None))
+    assert [c[0] for c in backend.calls] == ["down", "up"]

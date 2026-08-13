@@ -495,7 +495,11 @@ class GestureEngine:
         # the live log shows grab.down/grab.up pairs firing repeatedly.
         # count == 0 was 100% accurate across 444 real fist frames, so it is
         # sufficient on its own.
-        fisted = count == 0
+        # A pinch closing into a fist passes through both states, and both drive
+        # the same physical button — the live log shows select.down, grab.down,
+        # grab.up, select.up nested on one gesture. Whichever latched first keeps
+        # the button until it releases.
+        fisted = count == 0 and not self.pinch.state
         if fisted and not self.grab.state:
             self.grab.state = True
             self._emit(Intent.GRAB_DOWN, frame)
