@@ -65,8 +65,8 @@ class Mapping:
     # reliable centre of the cone, where LMC1 error is ~8mm rather than the >20mm
     # RMS it reaches at the extremes. Higher gain is a dropout mitigation, not
     # only a comfort setting.
-    gain_min: float = 2.0
-    gain_max: float = 22.0
+    gain_min: float = 2.12
+    gain_max: float = 23.32
     speed_lo: float = 25.0       # mm/s at or below which gain_min applies
     speed_hi: float = 380.0      # mm/s at or above which gain_max applies
     deadzone_mm: float = 0.12    # below this per-frame delta, don't move at all
