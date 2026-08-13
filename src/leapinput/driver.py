@@ -115,6 +115,12 @@ class Mapping:
 
     scroll_gain: float = 1.0
 
+    # 1 euro filter seeds for the pointer. Defaults tuned for the Leap at 111fps;
+    # the camera source lowers min_cutoff and raises beta (see camera.tune_for_camera)
+    # because its landmarks are noisier and arrive at a quarter of the rate.
+    pointer_min_cutoff: float = 1.0
+    pointer_beta: float = 0.007
+
 
 def _remap(value: float, lo: float, hi: float, out_hi: float) -> float:
     t = (value - lo) / (hi - lo)
@@ -145,10 +151,18 @@ class DirectDriver:
         # the main screen — measured here: the second display lives at (-541,-1440).
         self.min_x, self.min_y, self.max_x, self.max_y = backend.bounds
         self.x, self.y = self.w / 2.0, self.h / 2.0
-        self._filter = OneEuroPlane(freq=110.0, min_cutoff=1.0, beta=0.007)
+        self._filter = OneEuroPlane(freq=110.0, min_cutoff=self.map.pointer_min_cutoff,
+                                    beta=self.map.pointer_beta)
         self._last: tuple[float, float] | None = None   # last filtered hand x/z
         self._warned: set[str] = set()
         self._button_down = False
+        # Where the cursor was when the pinch STARTED forming. Selection motion
+        # displaces the pointer at the exact moment it must hold still — the
+        # "Heisenberg effect", measured at 30% of all mid-air pointing errors,
+        # and backdating the click to gesture onset cut errors 25% (Wolf et al.,
+        # CHI 2020). The settle ramp already slows the drift; this pins the
+        # click itself to where the user was aiming before the pinch moved it.
+        self._click_anchor: tuple[float, float] | None = None
 
     def _gain(self, speed: float) -> float:
         lo, hi = self.map.speed_lo, self.map.speed_hi
@@ -193,15 +207,22 @@ class DirectDriver:
 
     def _on_clutch_up(self, event: IntentEvent) -> None:
         self._last = None
+        self._click_anchor = None
 
     def _on_disengage(self, event: IntentEvent) -> None:
         self._last = None
+        self._click_anchor = None
         self._press(False)          # never disengage holding the button
 
     # --- pointer ------------------------------------------------------------
 
     def _on_point_move(self, event: IntentEvent) -> None:
         frame = event.frame
+        settle = event.data.get("settle", 1.0)
+        if settle >= 1.0:
+            self._click_anchor = None       # pinch fully open again: re-arm
+        elif self._click_anchor is None and not self._button_down:
+            self._click_anchor = (self.x, self.y)   # pinch starts forming: aim is HERE
         # Only the two plane axes are read, filtered or integrated. The off-plane
         # axis gates (engage floor, edge guard) but never contributes to position.
         p = frame.track_point(self.map.tracking_point)
@@ -251,6 +272,9 @@ class DirectDriver:
         (self.backend.down if down else self.backend.up)(self.x, self.y)
 
     def _on_select_down(self, event: IntentEvent) -> None:
+        if self._click_anchor is not None:
+            self.x, self.y = self._click_anchor
+            self.backend.move(self.x, self.y)
         self._press(True)
 
     def _on_select_up(self, event: IntentEvent) -> None:
