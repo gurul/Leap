@@ -55,14 +55,20 @@ class Mapping:
     # display in ~150mm of fast travel. Note the index fingertip also raises
     # effective sensitivity for free, since the tip travels further than the palm
     # for the same wrist rotation.
-    # Do not lower gain_min further: low control-display gain measurably HURTS
-    # pointing (more clutching, higher limb speeds), and pointer acceleration beats
-    # constant gain by 3.3-5.6%, most on small targets. The non-linear curve is the
-    # point; a low floor is not "precision", it is just slow.
-    gain_min: float = 0.9
-    gain_max: float = 10.0
-    speed_lo: float = 30.0       # mm/s at or below which gain_min applies
-    speed_hi: float = 450.0      # mm/s at or above which gain_max applies
+    # Raised by use. Low control-display gain measurably HURTS pointing — more
+    # clutching, higher limb speeds — and pointer acceleration beats constant gain
+    # by 3.3-5.6%, most on small targets. A low floor is not "precision", it is
+    # just slow; the non-linear RATIO is what buys precision, so both ends move
+    # together and the ~11x slow-to-fast ratio is preserved.
+    #
+    # This also matters for tracking: a hand that has to travel less stays in the
+    # reliable centre of the cone, where LMC1 error is ~8mm rather than the >20mm
+    # RMS it reaches at the extremes. Higher gain is a dropout mitigation, not
+    # only a comfort setting.
+    gain_min: float = 2.0
+    gain_max: float = 22.0
+    speed_lo: float = 25.0       # mm/s at or below which gain_min applies
+    speed_hi: float = 380.0      # mm/s at or above which gain_max applies
     deadzone_mm: float = 0.12    # below this per-frame delta, don't move at all
 
     # Scales both gain ends together, so --gain retunes overall sensitivity
