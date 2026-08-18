@@ -291,3 +291,256 @@ def test_disengage_never_leaves_the_button_held():
     driver.on_intent(IntentEvent(Intent.GRAB_DOWN, 0.0, None))
     driver.on_intent(IntentEvent(Intent.DISENGAGE, 0.0, None))
     assert [c[0] for c in backend.calls] == ["down", "up"]
+
+
+# --- deadzone accumulation (plan item 2, 2026-08-18) -------------------------
+
+def test_slow_drift_accumulates_instead_of_vanishing():
+    """Motion slower than the per-frame deadzone must still arrive. The old code
+    advanced the anchor before the deadzone check, permanently eating any hand
+    motion under ~deadzone/frame — fine aiming was structurally impossible."""
+    driver, _ = make(Mapping(plane="xz", deadzone_mm=0.6,
+                             pointer_min_cutoff=1000.0))  # filter ~transparent
+    start = driver.x
+    frames = [frame(i * 0.3, 150, 0, i * 33_000) for i in range(61)]
+    drive(driver, frames)
+    # 18mm of total travel at 0.3mm/frame: with an accumulating anchor the
+    # cursor must cover it (scaled by gain); consumed per-frame it moved 0.
+    assert abs(driver.x - start) > 10.0
+
+
+def test_alternating_noise_nets_to_nothing():
+    """The same accumulator must NOT turn resting jitter into drift."""
+    driver, _ = make(Mapping(plane="xz", deadzone_mm=0.6,
+                             pointer_min_cutoff=1000.0))
+    start = driver.x
+    frames = [frame(0.25 if i % 2 else 0.0, 150, 0, i * 33_000)
+              for i in range(60)]
+    drive(driver, frames)
+    assert abs(driver.x - start) < 2.0
+
+
+# --- click-anchor lifecycle (plan item 3, 2026-08-18) ------------------------
+
+def press_frame(x, z, t_us, pinch_mm) -> HandFrame:
+    f = frame(x, 150, z, t_us)
+    return dataclasses.replace(f, pinch_distance=pinch_mm, pinch_strength=0.9)
+
+
+def test_second_click_does_not_teleport_to_the_first_anchor():
+    """The anchor must die with its click. It used to survive select_up and
+    warp the SECOND click back to the first position."""
+    driver, backend = make()
+    t = 0.0
+    driver.on_intent(IntentEvent(Intent.CLUTCH_DOWN, t, frame(0, 150, 0, 0)))
+    # First click at the initial position, anchor armed via a forming pinch.
+    driver.on_intent(IntentEvent(Intent.POINT_MOVE, 0.01,
+                                 frame(0, 150, 0, 10_000), {"settle": 0.5}))
+    driver.on_intent(IntentEvent(Intent.SELECT_DOWN, 0.02, frame(0, 150, 0, 20_000)))
+    driver.on_intent(IntentEvent(Intent.SELECT_UP, 0.05, frame(0, 150, 0, 50_000)))
+    first_xy = (driver.x, driver.y)
+    # Move far away (full-settle frames), then click again with a fresh pinch.
+    for i in range(2, 30):
+        driver.on_intent(IntentEvent(Intent.POINT_MOVE, i * 0.033,
+                                     frame(i * 8.0, 150, 0, i * 33_000),
+                                     {"settle": 1.0}))
+    moved_xy = (driver.x, driver.y)
+    assert moved_xy != first_xy
+    driver.on_intent(IntentEvent(Intent.POINT_MOVE, 1.0,
+                                 frame(28 * 8.0, 150, 0, 1_000_000),
+                                 {"settle": 0.5}))
+    driver.on_intent(IntentEvent(Intent.SELECT_DOWN, 1.03,
+                                 frame(28 * 8.0, 150, 0, 1_030_000)))
+    assert (driver.x, driver.y) == moved_xy, \
+        "second click teleported back to the first click's stale anchor"
+
+
+def test_a_stale_anchor_is_ignored():
+    """Anchor armed, then a second of hesitation: the warp must not happen."""
+    driver, _ = make()
+    driver.on_intent(IntentEvent(Intent.CLUTCH_DOWN, 0.0, frame(0, 150, 0, 0)))
+    driver.on_intent(IntentEvent(Intent.POINT_MOVE, 0.01,
+                                 frame(0, 150, 0, 10_000), {"settle": 0.5}))
+    anchored = (driver.x, driver.y)
+    # Drift a little while the pinch keeps forming (settle < 1 so no re-arm),
+    # slowly enough to stay under ANCHOR_MAX_DIST_PX.
+    for i in range(1, 10):
+        driver.on_intent(IntentEvent(Intent.POINT_MOVE, 0.01 + i * 0.033,
+                                     frame(i * 1.5, 150, 0, 10_000 + i * 33_000),
+                                     {"settle": 0.5}))
+    drifted = (driver.x, driver.y)
+    driver.on_intent(IntentEvent(Intent.SELECT_DOWN, 1.5,
+                                 frame(15.0, 150, 0, 1_500_000)))
+    assert (driver.x, driver.y) == drifted != anchored, \
+        "a 1.5s-old anchor must not warp the click"
+
+
+def test_click_up_lands_on_the_down_pixel():
+    """macOS resolves the click on mouse-up; a click (not a drag) must post
+    down and up on the same pixel even if the opening pinch drifts a few px."""
+    driver, backend = make()
+    driver.on_intent(IntentEvent(Intent.CLUTCH_DOWN, 0.0, frame(0, 150, 0, 0)))
+    driver.on_intent(IntentEvent(Intent.SELECT_DOWN, 0.02, frame(0, 150, 0, 20_000)))
+    down_xy = (driver.x, driver.y)
+    # A few px of drift while the button is held (under CLICK_TRAVEL_PX).
+    driver.on_intent(IntentEvent(Intent.POINT_MOVE, 0.05,
+                                 frame(0.8, 150, 0, 50_000), {"settle": 1.0}))
+    driver.on_intent(IntentEvent(Intent.POINT_MOVE, 0.08,
+                                 frame(1.6, 150, 0, 80_000), {"settle": 1.0}))
+    driver.on_intent(IntentEvent(Intent.SELECT_UP, 0.1, frame(1.6, 150, 0, 100_000)))
+    assert (driver.x, driver.y) == down_xy
+    assert backend.calls[-2:] == [("move", *down_xy), ("up", *down_xy)]
+
+
+def test_a_drag_release_stays_where_it_was_dragged():
+    driver, backend = make()
+    driver.on_intent(IntentEvent(Intent.CLUTCH_DOWN, 0.0, frame(0, 150, 0, 0)))
+    driver.on_intent(IntentEvent(Intent.GRAB_DOWN, 0.02, frame(0, 150, 0, 20_000)))
+    for i in range(1, 20):
+        driver.on_intent(IntentEvent(Intent.POINT_MOVE, i * 0.033,
+                                     frame(i * 8.0, 150, 0, i * 33_000),
+                                     {"settle": 1.0}))
+    dragged = (driver.x, driver.y)
+    driver.on_intent(IntentEvent(Intent.GRAB_UP, 0.7, frame(152.0, 150, 0, 700_000)))
+    assert (driver.x, driver.y) == dragged
+
+
+# --- cursor truth (plan item 7, 2026-08-18) ----------------------------------
+
+def test_reclutch_absorbs_external_cursor_motion():
+    """Trackpad use between clutches must not snap the cursor back to the
+    driver's phantom position: every clutch re-syncs from the backend."""
+    driver, backend = make()
+    drive(driver, [frame(0, 150, 0, 0), frame(30, 150, 0, 100_000)])
+    driver.on_intent(IntentEvent(Intent.CLUTCH_UP, 0.2, None))
+    backend._pos = (100.0, 200.0)          # the user moved the mouse
+    driver.on_intent(IntentEvent(Intent.CLUTCH_DOWN, 0.3, frame(30, 150, 0, 300_000)))
+    assert (driver.x, driver.y) == (100.0, 200.0)
+
+
+def test_containment_never_lands_in_the_void():
+    """Two displays: 1512x982 at (0,0) and 2560x1440 at (-541,-1440). The union
+    rectangle contains a void (e.g. right of the laptop, above its top edge);
+    the old union clamp could strand the cursor there."""
+    from leapinput.actions import DryRunBackend
+
+    backend = DryRunBackend(bounds=LAPTOP_PLUS_MONITOR)
+    driver = DirectDriver(backend, Mapping(plane="xz"))
+    driver.rects = [(0.0, 0.0, 1512.0, 982.0),
+                    (-541.0, -1440.0, 2019.0, 0.0)]
+
+    def inside_some(x, y):
+        return any(x0 <= x <= x1 - 1 and y0 <= y <= y1 - 1
+                   for x0, y0, x1, y1 in driver.rects)
+
+    # A grid over and past the union, including the void at (1800, 500):
+    # right of the laptop's 1512 edge, below the monitor's bottom (y>0).
+    for x in (-800.0, -541.0, 0.0, 756.0, 1511.0, 1800.0, 2100.0):
+        for y in (-1500.0, -1440.0, -700.0, 0.0, 500.0, 981.0, 1200.0):
+            cx, cy = driver._contain(x, y)
+            assert inside_some(cx, cy), f"({x},{y}) contained to void ({cx},{cy})"
+    # And a point in the void specifically must land on a real display.
+    cx, cy = driver._contain(1800.0, 500.0)
+    assert inside_some(cx, cy)
+
+
+def test_click_state_builds_doubles_and_resets():
+    from leapinput.actions import next_click_state
+
+    t0 = 100.0
+    s1 = next_click_state(1, None, None, t0, (10, 10))
+    assert s1 == 1
+    s2 = next_click_state(s1, t0 + 0.1, (10, 10), t0 + 0.3, (12, 11))
+    assert s2 == 2
+    s3 = next_click_state(s2, t0 + 0.5, (12, 11), t0 + 0.8, (12, 12))
+    assert s3 == 3
+    # A pause resets…
+    assert next_click_state(s3, t0 + 1.0, (12, 12), t0 + 1.9, (12, 12)) == 1
+    # …and so does distance.
+    assert next_click_state(2, t0 + 2.0, (12, 12), t0 + 2.1, (80, 12)) == 1
+
+
+# --- finger-frame region mapping (2026-08-18) --------------------------------
+
+def test_frame_region_maps_to_screen_pixels():
+    from leapinput.driver import frame_region_px
+
+    region = frame_region_px((0.25, 0.25, 0.75, 0.75), (1512.0, 982.0), 0.05)
+    assert region == (378, 245, 756, 491)
+
+
+def test_a_sloppy_tiny_frame_is_rejected():
+    from leapinput.driver import frame_region_px
+
+    assert frame_region_px((0.5, 0.2, 0.52, 0.8), (1512.0, 982.0), 0.05) is None
+    assert frame_region_px(None, (1512.0, 982.0), 0.05) is None
+
+
+def test_screenshot_pane_presses_no_keys():
+    """The screenshot action must not send Cmd+N into the frontmost app."""
+    from leapinput import driver as drv
+    from leapinput.actions import DryRunBackend
+    from leapinput.commands import Command, CommandEvent
+
+    captured = []
+    original = drv._screenshot_region
+    drv._screenshot_region = lambda *a: captured.append(a)
+    try:
+        backend = DryRunBackend()
+        sd = drv.ShortcutDriver(backend)        # default: screenshot
+        sd.on_command(CommandEvent(Command.NEW_PANE, 0.0,
+                                   {"rect": (0.2, 0.2, 0.8, 0.8)}))
+    finally:
+        drv._screenshot_region = original
+    assert captured and captured[0][2] > 0      # a real region was captured
+    assert not [c for c in backend.calls if c[0] == "key"]
+
+
+# --- dictation hold and free-hand clipboard (2026-08-18) ---------------------
+
+def _shortcut_driver():
+    from leapinput import driver as drv
+    from leapinput.actions import DryRunBackend
+
+    backend = DryRunBackend()
+    return drv.ShortcutDriver(backend), backend
+
+
+def _cmd(command, **data):
+    from leapinput.commands import Command, CommandEvent
+    return CommandEvent(Command(command), 0.0, data)
+
+
+def test_dictate_holds_and_releases_option():
+    sd, backend = _shortcut_driver()
+    sd.on_command(_cmd("dictate", active=True))
+    sd.on_command(_cmd("dictate", active=False))
+    holds = [c for c in backend.calls if c[0] == "key_hold"]
+    assert holds == [("key_hold", sd.KEY_OPTION, True, {"alt": True}),
+                     ("key_hold", sd.KEY_OPTION, False, {"alt": True})]
+    assert sd._dict_timer is None               # watchdog disarmed with the key
+
+
+def test_dictate_edges_are_idempotent():
+    sd, backend = _shortcut_driver()
+    sd.on_command(_cmd("dictate", active=True))
+    sd.on_command(_cmd("dictate", active=True))     # duplicate start
+    sd.release_dictation()
+    sd.release_dictation()                          # duplicate stop
+    holds = [c for c in backend.calls if c[0] == "key_hold"]
+    assert [h[2] for h in holds] == [True, False]
+
+
+def test_copy_paste_press_cmd_c_and_v():
+    sd, backend = _shortcut_driver()
+    sd.on_command(_cmd("copy"))
+    sd.on_command(_cmd("paste"))
+    keys = [c for c in backend.calls if c[0] == "key"]
+    assert keys == [("key", sd.KEY_C, {"cmd": True}),
+                    ("key", sd.KEY_V, {"cmd": True})]
+
+
+def test_enter_taps_return():
+    sd, backend = _shortcut_driver()
+    sd.on_command(_cmd("enter"))
+    assert ("key", sd.KEY_RETURN, {}) in backend.calls

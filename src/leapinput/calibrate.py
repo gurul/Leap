@@ -66,7 +66,9 @@ def _banner(cv2, bgr, phase: str, instruction: str, left: float,
 def capture(out_path: Path, rounds: int, hand: str, camera_index: int) -> int:
     import cv2
 
-    source = CameraSource(camera=camera_index, preview=True)
+    # hand= matters most HERE: calibration records fists and pinches, exactly
+    # the poses where the handedness label flaps.
+    source = CameraSource(camera=camera_index, preview=True, hand=hand)
     state = {"label": None, "round": 0}
     rows: list[dict] = []
 

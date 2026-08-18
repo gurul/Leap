@@ -219,6 +219,13 @@ class Config:
     pinch_off_mm: float = 68.0
     pinch_dwell: float = 0.03
     pinch_min_strength: float = 0.50
+    # RELEASE ASSIST (camera path): a held pinch measures 15-18mm, but a
+    # relaxed post-click hand parks INSIDE the 50-68mm hysteresis band —
+    # fingers "kind of open", never reaching the off threshold — leaving the
+    # button silently held. Distance above the ENGAGE threshold (where a
+    # pinch could not even start) sustained this long is release intent;
+    # single-frame noise spikes mid-drag are far shorter and don't trip it.
+    pinch_release_assist_s: float = 0.20
 
     # Cursor stabilisation while a click is forming.
     #
@@ -231,14 +238,24 @@ class Config:
     # Between these distances the click is "forming", and the cursor is
     # progressively frozen so the last millimetres of the pinch cannot drag it off
     # target. Mirrors TouchFree's growing click deadzone.
+    # settle_full == pinch_on: the freeze completes exactly at the Schmitt's
+    # firing threshold, so mouse-down posts on a fully-stopped cursor. The old
+    # 38.0 sat 12mm past the trigger — the click fired at ~71% gain and the
+    # freeze arrived after the event it was meant to protect.
     settle_start_mm: float = 55.0   # begin stabilising
-    settle_full_mm: float = 38.0    # fully frozen just before the click fires
+    settle_full_mm: float = 50.0    # fully frozen AT the click threshold
 
     # Grab = fist. The cleanest signal on this hardware: grab_strength was >0.5 on
     # 100% of fist frames and 0% of every other pose. Effectively binary.
     grab_on: float = 0.75
     grab_off: float = 0.35
     grab_dwell: float = 0.06
+    # Off, the fist is INERT — pinch is the only button (and pinch already
+    # holds it, so pinch-and-move still drags). On the camera the pinch<->fist
+    # handover misreads made clicking flaky, so the CLI defaults this off
+    # there; the Leap's grab_strength is clean (measured above), so it stays
+    # on for --source leap.
+    grab_enabled: bool = True
 
     # The vocabulary is a monotonic ladder on EXTENDED FINGER COUNT.
     #
@@ -329,6 +346,7 @@ class GestureEngine:
             self.cfg.release_y_xy if xy else self.cfg.release_y,
             self.cfg.engage_dwell)
         self.pinch = Schmitt(self.cfg.pinch_on_mm, self.cfg.pinch_off_mm, self.cfg.pinch_dwell)
+        self._pinch_slack_since: Optional[float] = None    # release assist
         self.grab = Schmitt(self.cfg.grab_on, self.cfg.grab_off, self.cfg.grab_dwell)
         # on_at < off_at: a SMALL angle means palm-down means engaged.
         self.clutch = Schmitt(
@@ -415,17 +433,23 @@ class GestureEngine:
         angle = palm_angle_degrees(frame, self.clutch_ref)
         self.last_clutch_angle = angle
 
-        if self.cfg.clutch_mode == "fingers":
+        # Bypass FIRST: --no-clutch is the advertised stuck-cursor escape
+        # hatch, and checking the mode before it made the flag dead code in the
+        # default finger vocabulary. Under bypass the pointer moves whenever a
+        # hand is tracked; pinch still clicks, but fist-drag and open-hand lift
+        # are unavailable (the ladder is what drives them).
+        if not self.cfg.clutch_enabled:
+            if not self.clutch.state:        # latch on and stay on
+                self.clutch.state = True
+                self._emit(Intent.CLUTCH_DOWN, frame)
+        elif self.cfg.clutch_mode == "fingers":
             self._update_finger_ladder(frame, now)
-        elif self.cfg.clutch_enabled:
+        else:
             edge = self.clutch.update(angle, now)
             if edge is True:
                 self._emit(Intent.CLUTCH_DOWN, frame)
             elif edge is False:
                 self._emit(Intent.CLUTCH_UP, frame)
-        elif not self.clutch.state:          # bypass: latch on and stay on
-            self.clutch.state = True
-            self._emit(Intent.CLUTCH_DOWN, frame)
 
         if self.clutch.state:
             self._emit(Intent.POINT_MOVE, frame,
@@ -456,7 +480,7 @@ class GestureEngine:
             elif edge is False:
                 self._emit(Intent.SELECT_UP, frame)
 
-        if not self.pinch.state:
+        if self.cfg.grab_enabled and not self.pinch.state:
             edge = self.grab.update(frame.grab_strength, now)
             if edge is True:
                 self._emit(Intent.GRAB_DOWN, frame)
@@ -496,9 +520,18 @@ class GestureEngine:
         # count == 0 was 100% accurate across 444 real fist frames, so it is
         # sufficient on its own.
         # A pinch closing into a fist passes through both states, and both drive
-        # the same physical button — the live log shows select.down, grab.down,
-        # grab.up, select.up nested on one gesture. Whichever latched first keeps
-        # the button until it releases.
+        # the same physical button — so when the debounced count says FIST, the
+        # pinch latch hands over silently: no SELECT_UP (that would release the
+        # physical button mid-gesture; _press idempotency makes the following
+        # GRAB_DOWN a physical no-op) and the drag is thereafter owned by the
+        # deliberate debounced open hand, not two noisy frames of pinch distance.
+        if not self.cfg.grab_enabled:
+            # Fist inert: no handover, no grab. The pinch owns the button
+            # outright — a pinch closing toward a fist keeps it held (the
+            # distance stays collapsed), which is drag enough.
+            return
+        if count == 0 and self.pinch.state:
+            self.pinch.force_off()
         fisted = count == 0 and not self.pinch.state
         if fisted and not self.grab.state:
             self.grab.state = True
@@ -508,19 +541,50 @@ class GestureEngine:
             self._emit(Intent.GRAB_UP, frame)
 
     def _update_pinch(self, frame: HandFrame, now: float) -> None:
-        """Click on a high-confidence pinch: distance AND strength must agree."""
-        confident = frame.pinch_strength >= self.cfg.pinch_min_strength
+        """Click on a high-confidence pinch: distance AND strength must agree.
+
+        A CLOSING FIST also collapses thumb-index distance on its way shut, so a
+        fist-shaped frame (raw count 0) may not START a pinch — that race let the
+        noisy pinch latch first and steal the drag from the debounced count
+        (corpus: fist reads count 0 on 541/542 frames; a held pinch reads 1-2).
+        An already-latched pinch still releases on distance alone.
+        """
+        confident = (frame.pinch_strength >= self.cfg.pinch_min_strength
+                     and (self.pinch.state or frame.extended_count > 0))
         # Feed the Schmitt a value it will reject unless the corroborating signal
         # agrees, so hysteresis still governs the transition.
         value = frame.pinch_distance if confident else self.cfg.pinch_off_mm + 1.0
         edge = self.pinch.update(value, now)
+        # Release assist: a relaxed post-click hand parks inside the
+        # hysteresis band and never reaches the off threshold — the click
+        # silently becomes a hold. See Config.pinch_release_assist_s.
+        if edge is None and self.pinch.state:
+            if frame.pinch_distance > self.cfg.pinch_on_mm:
+                if self._pinch_slack_since is None:
+                    self._pinch_slack_since = now
+                elif (now - self._pinch_slack_since
+                        >= self.cfg.pinch_release_assist_s):
+                    self.pinch.force_off()
+                    edge = False
+            else:
+                self._pinch_slack_since = None
+        else:
+            self._pinch_slack_since = None
         if edge is True:
             self._emit(Intent.SELECT_DOWN, frame)
         elif edge is False:
             self._emit(Intent.SELECT_UP, frame)
 
     def _settle_factor(self, frame: HandFrame) -> float:
-        """1.0 = move freely, 0.0 = frozen. Ramps as a pinch closes."""
+        """1.0 = move freely, 0.0 = frozen. Ramps as a pinch closes.
+
+        Only while the click is FORMING. Once either button latches, the hand
+        is dragging and needs full gain back — a held pinch (~15mm) and a fist
+        (~18mm) both sit below settle_full for their whole duration, so gating
+        on the raw distance froze every drag the vocabulary promises.
+        """
+        if self.pinch.state or self.grab.state:
+            return 1.0
         start, full = self.cfg.settle_start_mm, self.cfg.settle_full_mm
         d = frame.pinch_distance
         if d >= start:

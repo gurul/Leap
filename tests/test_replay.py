@@ -184,3 +184,38 @@ def test_a_fist_does_not_also_scroll(ladder_fired):
     """One pose, one meaning. A fist carrying both drag and scroll is what
     produced 447 scroll events in a single session."""
     assert Intent.SCROLL.value not in discrete(ladder_fired, "fist")
+
+
+# --- driver-level replay: drags must actually move (plan item 1) -------------
+
+def test_a_fist_drag_moves_the_real_cursor():
+    """Intent-level tests proved POINT_MOVE fires during a fist; this pins that
+    the DRIVER then moves the cursor. The settle factor used to multiply gain to
+    exactly 0 for every held-button frame, freezing all drags silently."""
+    from leapinput.actions import DryRunBackend
+    from leapinput.driver import DirectDriver, Mapping
+
+    rows = [json.loads(line) for line in SESSION.open()]
+    engine = GestureEngine(Config(plane="xz", clutch_mode="fingers"))
+    backend = DryRunBackend()
+    driver = DirectDriver(backend, Mapping(plane="xz"))
+    engine.subscribe(driver.on_intent)
+
+    travel = {"held": 0.0}
+    prev = {"xy": None}
+
+    def measure(event):
+        if event.intent is Intent.POINT_MOVE and driver._button_down:
+            if prev["xy"] is not None:
+                travel["held"] += (abs(driver.x - prev["xy"][0])
+                                   + abs(driver.y - prev["xy"][1]))
+            prev["xy"] = (driver.x, driver.y)
+        elif event.intent is not Intent.POINT_MOVE:
+            prev["xy"] = None
+
+    engine.subscribe(measure)
+    for row in rows:
+        if row["step"] in ("fist", "pinch"):
+            engine.on_snapshot(Snapshot(right=rehydrate(row)))
+    assert travel["held"] > 0.0, \
+        "cursor displacement while the button is held must be nonzero (drag)"

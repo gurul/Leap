@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+# leapctl — the on/off switch for an always-on hand-control session.
+#
+#   leapctl on [extra flags]   start (detached, no deadline, survives the terminal)
+#   leapctl off                stop cleanly (SIGINT -> buttons released; the
+#                              out-of-process guard covers every other exit)
+#   leapctl status             running or not
+#   leapctl log [n]            tail the session log
+#
+# While running, the ILY pose (thumb+index+pinky, held 1s) pauses/resumes all
+# gesture control in-band — use that for quick toggling; `off` for actually
+# stopping. Dry-run practice room: `leapctl on --backend dry-run --preview`.
+
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+RUN_DIR="${LEAPINPUT_RUN_DIR:-$HOME/.leapinput}"
+PID_FILE="$RUN_DIR/leapinput.pid"
+LOG_FILE="$RUN_DIR/leapinput.log"
+PAUSED_FILE="$RUN_DIR/paused"   # touched/removed by the session on every toggle
+BIN="$ROOT/.venv/bin/leapinput"
+
+alive() { [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; }
+
+case "${1:-status}" in
+  on)
+    shift || true
+    if alive; then
+      echo "already running (pid $(cat "$PID_FILE"))"
+      exit 0
+    fi
+    # A stray (pid file lost, session alive) would mean two cameras open and
+    # two cursors fighting: adopt it instead of doubling up.
+    stray="$(pgrep -f "$BIN --source" 2>/dev/null | head -1 || true)"
+    if [ -n "$stray" ]; then
+      mkdir -p "$RUN_DIR"
+      echo "$stray" >"$PID_FILE"
+      echo "already running (adopted stray pid $stray)"
+      exit 0
+    fi
+    mkdir -p "$RUN_DIR"
+    rm -f "$PAUSED_FILE"        # a crash can strand the flag; fresh start = unpaused
+    nohup "$BIN" --source camera --backend quartz --duration 0 "$@" \
+      >>"$LOG_FILE" 2>&1 &
+    echo $! >"$PID_FILE"
+    disown
+    echo "leapinput ON (pid $(cat "$PID_FILE")) — log: $LOG_FILE"
+    echo "  quick pause/resume without stopping: hold the ILY pose ~1.5s"
+    echo "  stop for real: $(basename "$0") off"
+    ;;
+  off)
+    # SIGINT first (clean release), escalate if the session doesn't die —
+    # the camera light staying green after "off" is worse than a hard kill
+    # (the out-of-process guard releases buttons on every exit path anyway).
+    stop_one() {
+      local pid="$1" sig
+      for sig in INT TERM KILL; do
+        kill -0 "$pid" 2>/dev/null || return 0
+        kill "-$sig" "$pid" 2>/dev/null || return 0
+        for _ in 1 2 3 4 5; do
+          sleep 0.2
+          kill -0 "$pid" 2>/dev/null || return 0
+        done
+      done
+    }
+    stopped=0
+    if alive; then
+      stop_one "$(cat "$PID_FILE")"
+      stopped=1
+    fi
+    # Sweep strays: sessions whose pid file was overwritten keep the camera on.
+    for pid in $(pgrep -f "$BIN --source" 2>/dev/null || true); do
+      stop_one "$pid"
+      stopped=1
+    done
+    rm -f "$PID_FILE" "$PAUSED_FILE"
+    if [ "$stopped" = 1 ]; then
+      echo "leapinput OFF — buttons released, camera closed"
+    else
+      echo "not running"
+    fi
+    ;;
+  status)
+    if alive; then
+      if [ -f "$PAUSED_FILE" ]; then
+        echo "running (paused, pid $(cat "$PID_FILE"))"
+      else
+        echo "running (pid $(cat "$PID_FILE"))"
+      fi
+    else
+      echo "off"
+    fi
+    ;;
+  pause|resume)
+    # One signal toggles: the session chimes low for pause, high for resume.
+    if alive; then
+      kill -USR1 "$(cat "$PID_FILE")"
+      echo "pause/resume toggled (listen for the chime)"
+    else
+      echo "not running"
+    fi
+    ;;
+  log)
+    tail -n "${2:-40}" "$LOG_FILE"
+    ;;
+  *)
+    echo "usage: leapctl [on [flags...] | off | status | pause | log [n]]" >&2
+    exit 2
+    ;;
+esac

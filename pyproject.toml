@@ -12,6 +12,7 @@ dependencies = [
 
 [project.scripts]
 leapinput = "leapinput.cli:main"
+leapinput-menubar = "leapinput.menubar:main"
 
 [project.optional-dependencies]
 dev = ["pytest"]
@@ -19,6 +20,8 @@ dev = ["pytest"]
 # mediapipe 1.x ships only the Tasks API; the model file is fetched separately
 # (see leapinput/camera.py MODEL_URL — scripts/setup.sh does it for you).
 camera = ["mediapipe"]
+# The menu bar on/off switch (rumps 0.4.0, current per PyPI 2026-08-18).
+menubar = ["rumps"]
 
 [build-system]
 requires = ["setuptools>=68"]

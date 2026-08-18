@@ -51,12 +51,27 @@ FINGER_CHAINS = ((5, 6, 8), (9, 10, 12), (13, 14, 16), (17, 18, 20))
 #     everywhere: worst corner is atan2(160, 200) = 38.7 deg, so the edge guard
 #     never damps camera motion. The camera has no "edge of the cone" — a hand is
 #     either detected or it is not.
-#   - Y spans 200..500, always above Config.engage_y_xy (40). Presence is the
+#   - Y spans 200..440, always above Config.engage_y_xy (40). Presence is the
 #     gate: hand in view = engaged, hand out of view = hard disengage. Same
 #     dead-man philosophy the Leap measurements settled on, delivered the same way.
+#
+# ISOTROPIC by construction: PLANE_Y_MM = PLANE_X_MM * 480/640, so one physical
+# centimetre of hand travel maps to the same virtual mm on both axes. The old
+# 320x300 pair over a 4:3 frame made vertical motion ~25% hotter (and noisier)
+# than horizontal for the same real movement.
+# Worst-corner eccentricity is atan2(hypot(160, 0), 200) = 38.7 deg, still under
+# Mapping.edge_ok_deg (40), so the edge guard never damps camera motion.
 PLANE_X_MM = 320.0                 # image width maps to +/-160mm
-PLANE_Y_MM = 300.0                 # image height maps to 300mm of travel
+PLANE_Y_MM = 240.0                 # image height, same mm-per-pixel as X
 PLANE_Y_BASE = 200.0               # bottom of image = 200mm
+
+# Depth gate, in normalized image units of knuckle span: a hand's image size
+# scales with 1/distance (its world span stays hand-sized), so span is a free
+# monocular range check. Below this the hand is beyond ~1.2m — a person in the
+# background, or too far to control precisely — and is ignored entirely rather
+# than allowed to grab the cursor. (The idea a full Depth Anything integration
+# would buy, at zero model cost; see TouchDesigner's TDDepthAnything.)
+MIN_SPAN_IMG = 0.04
 
 # pinch_strength synthesised from thumb-index tip distance (world landmarks, mm).
 # Anchored to gestures.Config: at pinch_on_mm (50) this yields 0.6, clearing
@@ -155,6 +170,46 @@ def _leap_axes(lm) -> Vec3:
     return Vec3(lm.x, -lm.y, -lm.z)
 
 
+def resolve_side(category_name: str, n_detected: int,
+                 assume: Optional[str] = None) -> str:
+    """Which HandFrame side a detected hand belongs to.
+
+    MediaPipe 1.0.0 labels handedness for the UN-mirrored image, so on the
+    selfie view we always process, the label is swapped. Worse, the label FLAPS
+    on fists and pinches — and a flap makes the configured hand vanish for a
+    frame, which reads downstream as tracking loss and releases everything
+    mid-gesture. When only ONE hand is visible and the caller told us whose it
+    is, identity beats classification: it is the configured hand, whatever the
+    label claims this frame. (A deliberate single-user tradeoff.)
+    """
+    if n_detected == 1 and assume is not None:
+        return assume
+    return "Right" if category_name == "Left" else "Left"
+
+
+def lone_hand_side(label_side: str, assume: Optional[str],
+                   prev_wrist: Optional[tuple[float, float]],
+                   wrist: tuple[float, float], elapsed_us: float,
+                   max_gap_us: float = 500_000, max_jump: float = 0.18) -> str:
+    """Refined side for a LONE detection, when free-hand poses are in play.
+
+    resolve_side's blanket "a lone hand is the configured hand" makes the free
+    hand's own poses (clipboard) unreachable: raise only the left hand and it
+    is labelled Right. But the assumption exists for a real reason — labels
+    flap on fists and pinches. Continuity separates the two cases: the
+    configured hand wins only when the detection is where that hand just WAS
+    (the flap, mid-gesture); a hand appearing fresh, away from it, is believed
+    to be what the label says. Wrist positions are normalized image coords, so
+    the jump threshold is a fraction of the frame."""
+    if assume is None:
+        return label_side
+    if prev_wrist is not None and elapsed_us <= max_gap_us:
+        dx, dy = wrist[0] - prev_wrist[0], wrist[1] - prev_wrist[1]
+        if dx * dx + dy * dy <= max_jump * max_jump:
+            return assume
+    return label_side
+
+
 def _dist(a, b) -> float:
     return math.sqrt((a.x - b.x) ** 2 + (a.y - b.y) ** 2 + (a.z - b.z) ** 2)
 
@@ -186,6 +241,9 @@ class PoseSignals:
     # 29.3mm — the 3D clouds overlap by 18mm. In pixel space the held tips
     # merge regardless of the depth guess, so this is the separable signal.
     pinch_img_mm: Optional[float] = None
+    # Knuckle span in NORMALIZED IMAGE units — the free monocular depth proxy:
+    # image size scales with 1/distance while the world span stays hand-sized.
+    span_img: Optional[float] = None
 
 
 def _dist2d(a, b, aspect: float) -> float:
@@ -196,7 +254,7 @@ def pose_signals(world, image=None, aspect: float = 0.75) -> PoseSignals:
     """`aspect` = frame height/width, to undo the anisotropy of normalized
     image coordinates before measuring 2D distances."""
     span = _dist(world[INDEX_MCP], world[PINKY_MCP])
-    pinch_img = None
+    pinch_img = span_img = None
     if image is not None:
         span_img = _dist2d(image[INDEX_MCP], image[PINKY_MCP], aspect)
         pinch_img = (_dist2d(image[THUMB_TIP], image[INDEX_TIP], aspect)
@@ -210,6 +268,7 @@ def pose_signals(world, image=None, aspect: float = 0.75) -> PoseSignals:
                   / max(1e-9, span)) * NOMINAL_SPAN_MM,
         span_mm=span * 1000.0,
         pinch_img_mm=pinch_img,
+        span_img=span_img,
     )
 
 
@@ -346,14 +405,23 @@ def tune_for_camera(gesture_cfg, mapping, tuning: Optional[Tuning] = None) -> No
     # Calibrated (or default) pinch band, in the camera's span-normalized mm.
     gesture_cfg.pinch_on_mm = tuning.pinch_on_mm
     gesture_cfg.pinch_off_mm = tuning.pinch_off_mm
-    gesture_cfg.settle_start_mm = tuning.pinch_on_mm + 5.0
-    gesture_cfg.settle_full_mm = max(1.0, tuning.pinch_on_mm - 12.0)
+    # Freeze completes AT the firing threshold (see gestures.Config): the ramp
+    # spans the last 8mm of approach and reaches 0.0 exactly when the Schmitt
+    # can fire, so the click posts on a stopped cursor — never after it.
+    gesture_cfg.settle_start_mm = tuning.pinch_on_mm + 8.0
+    gesture_cfg.settle_full_mm = tuning.pinch_on_mm
     # Vogel & Balakrishnan (UIST 2005) interpolate the cutoff 0.25->5 Hz as
-    # hand speed goes 10->200 mm/s: "removed jitter when still, almost no
-    # lag". Our 1 euro reaches the same band: 0.3 Hz at rest, ~5 Hz at
-    # 300 mm/s via beta.
-    mapping.pointer_min_cutoff = 0.3
-    mapping.pointer_beta = 0.015
+    # hand speed goes 10->200 mm/s. A 0.3 Hz floor was tried first and is a
+    # trap at 30fps: ~530ms of group delay in exactly the slow-speed regime of
+    # final target approach — the "syrup then overshoot" docs/plan.md warns
+    # about. 1.5 Hz rests at ~106ms; beta 0.03 reaches ~4.5 Hz at 100 mm/s and
+    # 7.5 Hz at 200 — the same band, without the syrup.
+    mapping.pointer_min_cutoff = 1.5
+    mapping.pointer_beta = 0.03
+    # Open the speed estimate too: at d_cutoff 1.0 the derivative that drives
+    # beta is itself ~5 frames late at 30fps, so the cutoff opened only after
+    # the motion it was reacting to. 2.0 halves that.
+    mapping.pointer_d_cutoff = 2.0
     # Landmark noise at rest is ~1-3px; at 640px->320mm that is up to ~1.5mm of
     # per-frame delta the Leap's 0.12mm deadzone happily amplifies into cursor
     # shiver. Swallow it: intent at these gains is never sub-half-millimetre.
@@ -370,14 +438,34 @@ class CameraSource:
     """
 
     def __init__(self, camera: int = 0, model_path=None, mirror: bool = True,
-                 preview: bool = False, tuning: Optional[Tuning] = None):
+                 preview: bool = False, tuning: Optional[Tuning] = None,
+                 hand: Optional[str] = None, two_hands: bool = False,
+                 min_detection_confidence: float = 0.5,
+                 min_presence_confidence: float = 0.5,
+                 min_tracking_confidence: float = 0.5):
         self._camera = camera
         self._model_path = Path(model_path) if model_path else DEFAULT_MODEL
         self._mirror = mirror
         self._preview = preview
         self._tuning = tuning or Tuning.load()
+        # The hand this session drives. Set, it buys two robustness wins: the
+        # detector only looks for ONE hand (fewer spurious second-hand blobs),
+        # and a lone detection is assigned to this side regardless of the
+        # per-frame handedness label (see resolve_side).
+        self._hand = hand
+        # Two-hand gestures (the finger-frame pane) need the detector looking
+        # for both hands even when a cursor hand is configured; a lone
+        # detection is still assigned to the configured side (resolve_side).
+        self._two_hands = two_hands
+        self._confidences = (min_detection_confidence,
+                             min_presence_confidence,
+                             min_tracking_confidence)
         self._subscribers: list[Callable[[Snapshot], None]] = []
         self._lock = threading.Lock()
+        # Last wrist position per side (normalized image coords + t_us), the
+        # continuity signal lone_hand_side uses to tell a label flap from the
+        # free hand raised alone.
+        self._last_wrist: dict[str, tuple[float, float, int]] = {}
         self.latest = Snapshot()
         self.frames = 0
         # Latest annotated BGR frame (numpy), written by the capture thread. On
@@ -393,6 +481,11 @@ class CameraSource:
         self._thread: Optional[threading.Thread] = None
         self._prev: dict[str, Optional[HandFrame]] = {"Left": None, "Right": None}
         self._frame_id = 0
+        # Pipeline health, written by the capture thread: measured camera fps,
+        # EMA of detection time, and whether detection kept up with the camera
+        # last frame. Read by the CLI overlay to make lag visible instead of
+        # mysterious.
+        self.stats: dict = {"fps": 0.0, "detect_ms": 0.0, "realtime": True}
 
     def subscribe(self, fn: Callable[[Snapshot], None]) -> None:
         self._subscribers.append(fn)
@@ -423,12 +516,24 @@ class CameraSource:
                 "Camera permission (System Settings > Privacy & Security > Camera)")
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        # Ask for the shallowest capture buffer the backend allows: a deep
+        # buffer serves STALE frames when detection falls behind, which reads
+        # as cursor lag no filter tuning can fix. Honored on some backends,
+        # harmless where ignored (the grab()-drain below covers those).
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
+        detect_c, presence_c, track_c = self._confidences
         landmarker = vision.HandLandmarker.create_from_options(
             vision.HandLandmarkerOptions(
                 base_options=BaseOptions(model_asset_path=str(self._model_path)),
                 running_mode=vision.RunningMode.VIDEO,
-                num_hands=2))
+                # Cursor control needs exactly one hand; asking for two invites
+                # a face or a background person in as a phantom second hand.
+                # Explicit confidences so the tunables are visible, not implied.
+                num_hands=1 if self._hand and not self._two_hands else 2,
+                min_hand_detection_confidence=detect_c,
+                min_hand_presence_confidence=presence_c,
+                min_tracking_confidence=track_c))
 
         self._stop.clear()
         self._thread = threading.Thread(
@@ -439,17 +544,35 @@ class CameraSource:
 
     def _run(self, cv2, mp, cap, landmarker) -> None:
         last_ms = 0
+        frame_budget_us = None          # measured from the frame cadence below
+        prev_capture_us = None
         while not self._stop.is_set():
+            # Detection slower than the camera means frames queue and every
+            # snapshot describes the past. Drain the stalest buffered frame
+            # before reading, so the pipeline degrades to a lower rate instead
+            # of a growing delay.
+            if not self.stats["realtime"]:
+                cap.grab()
             ok, bgr = cap.read()
+            # Timestamp CAPTURE, not the end of flip+convert: downstream dwells
+            # and velocities should measure when the hand moved, not how long
+            # this thread took to get around to it.
+            now_us = time.monotonic_ns() // 1_000
             if not ok:
                 time.sleep(0.05)
                 continue
+            if prev_capture_us is not None:
+                interval = now_us - prev_capture_us
+                fps = self.stats["fps"]
+                self.stats["fps"] = (0.9 * fps + 0.1 * (1e6 / interval)
+                                     if fps else 1e6 / interval)
+                frame_budget_us = interval
+            prev_capture_us = now_us
             if self._mirror:
                 bgr = cv2.flip(bgr, 1)
             rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
             image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
             # detect_for_video requires strictly increasing timestamps.
-            now_us = time.monotonic_ns() // 1_000
             ms = max(last_ms + 1, now_us // 1_000)
             last_ms = ms
             try:
@@ -458,23 +581,40 @@ class CameraSource:
                 if self._stop.is_set():     # racing a close(); not an error
                     return
                 raise
+            detect_us = time.monotonic_ns() // 1_000 - now_us
+            ema = self.stats["detect_ms"]
+            self.stats["detect_ms"] = (0.9 * ema + 0.1 * (detect_us / 1000.0)
+                                       if ema else detect_us / 1000.0)
+            if frame_budget_us:
+                self.stats["realtime"] = detect_us <= frame_budget_us
 
             snap = Snapshot()
             self._frame_id += 1
             for handedness, img_lms, wld_lms in zip(
                     result.handedness, result.hand_landmarks,
                     result.hand_world_landmarks):
-                # MediaPipe 1.0.0 labels handedness for the UN-mirrored image:
-                # measured 2026-08-12, a right hand on this mirrored feed read
-                # "Left" on 186/186 frames. Swap, since we always process the
-                # selfie view.
-                side = "Right" if handedness[0].category_name == "Left" else "Left"
+                n = len(result.handedness)
+                side = resolve_side(handedness[0].category_name,
+                                    n, self._hand)
+                if n == 1 and self._hand is not None and self._two_hands:
+                    # Free-hand poses exist: a lone detection may genuinely
+                    # be the OTHER hand. Identity wins only on continuity.
+                    lw = self._last_wrist.get(self._hand)
+                    side = lone_hand_side(
+                        resolve_side(handedness[0].category_name, 2, None),
+                        self._hand,
+                        None if lw is None else lw[:2],
+                        (img_lms[0].x, img_lms[0].y),
+                        now_us - (lw[2] if lw is not None else 0))
                 sig = pose_signals(wld_lms, img_lms,
                                    aspect=bgr.shape[0] / bgr.shape[1])
+                if sig.span_img is not None and sig.span_img < MIN_SPAN_IMG:
+                    continue        # beyond working distance: not our hand
                 frame = handframe_of(img_lms, wld_lms, side, self._frame_id,
                                      now_us, prev=self._prev.get(side),
                                      tuning=self._tuning, signals=sig)
                 self._prev[side] = frame
+                self._last_wrist[side] = (img_lms[0].x, img_lms[0].y, now_us)
                 self.latest_signals[side] = sig
                 setattr(snap, side.lower(), frame)
             # MediaPipe occlusion failures are binary whole-hand dropouts of a
@@ -486,7 +626,16 @@ class CameraSource:
                 if snap.get(side) is None:
                     held = self._prev.get(side)
                     if held is not None and now_us - held.timestamp < 150_000:
-                        setattr(snap, side.lower(), held)
+                        # RESTAMP the held frame and freeze its velocity. The
+                        # engine clocks off frame timestamps, so re-serving the
+                        # old stamp froze the engine's clock and stalled every
+                        # pending release dwell for the dropout's duration;
+                        # the stale velocity would spike the gain curve.
+                        # _prev keeps the ORIGINAL frame: the 150ms age check
+                        # still expires, and reappearance velocity uses true dt.
+                        setattr(snap, side.lower(), dataclasses.replace(
+                            held, timestamp=now_us,
+                            palm_velocity=Vec3(0.0, 0.0, 0.0)))
                     else:
                         self._prev[side] = None
                         self.latest_signals[side] = None
@@ -495,8 +644,7 @@ class CameraSource:
                 self.preview_frame = bgr
             self._dispatch(snap)
 
-    @staticmethod
-    def _annotate(cv2, bgr, result, snap: Snapshot) -> None:
+    def _annotate(self, cv2, bgr, result, snap: Snapshot) -> None:
         """Skeleton + per-hand signal readout, drawn on the mirrored frame."""
         h, w = bgr.shape[:2]
         for img_lms in result.hand_landmarks:
@@ -517,7 +665,8 @@ class CameraSource:
         # Fingertips: green = read as extended, red = read as curled.
         for img_lms, hand in zip(result.hand_landmarks,
                                  result.handedness):
-            side = "Right" if hand[0].category_name == "Left" else "Left"
+            side = resolve_side(hand[0].category_name,
+                                len(result.handedness), self._hand)
             frame = snap.get(side)
             if frame is None:
                 continue
