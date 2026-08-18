@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
+from pathlib import Path
 
 from . import (
     CameraSource, Config, DirectDriver, GestureEngine, Intent, LeapSource,
@@ -41,15 +43,19 @@ def _overlay_status(cv2, bgr, engine, tracked, last_intent: str,
                     (255, 255, 255) if ok else (0, 191, 255), 1, cv2.LINE_AA)
 
 
-def _chime(resumed: bool) -> None:
-    """Audible pause/resume cue, best-effort and non-blocking (macOS)."""
+def _play(sound: str) -> None:
+    """Best-effort, non-blocking system sound (macOS)."""
     import subprocess
-    sound = "Glass" if resumed else "Bottle"
     try:
         subprocess.Popen(["afplay", f"/System/Library/Sounds/{sound}.aiff"],
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception:
         pass
+
+
+def _chime(resumed: bool) -> None:
+    """Audible pause/resume cue."""
+    _play("Glass" if resumed else "Bottle")
 
 
 def resolve_source_defaults(args) -> None:
@@ -69,6 +75,8 @@ def resolve_source_defaults(args) -> None:
         args.invert_x = args.source == "leap"
     if args.invert_z is None:
         args.invert_z = False
+    if args.drag is None:
+        args.drag = args.source == "leap"
 
 
 def _overlay_commands(cv2, bgr, overlay: dict) -> None:
@@ -115,11 +123,14 @@ def main(argv=None) -> int:
     ap.add_argument("--no-commands", action="store_true",
                     help="camera only: disable the pose-hold commands (finger-"
                          "frame pane, OK-pose Mission Control, ILY pause)")
+    ap.add_argument("--no-screen-overlay", action="store_true",
+                    help="camera only: don't draw the framed region on the "
+                         "screen while holding the finger-frame pose")
     ap.add_argument("--pane", choices=("screenshot", "window", "tab"),
                     default="screenshot",
                     help="what the finger-frame gesture does: screenshot the "
-                         "framed region to the Desktop (default), spawn a new "
-                         "window placed over it, or open a tab")
+                         "framed region to the clipboard (default), spawn a "
+                         "new window placed over it, or open a tab")
     ap.add_argument("--verbose", action="store_true", help="log pointer moves too")
     ap.add_argument("--invert-x", action=argparse.BooleanOptionalAction,
                     default=None,
@@ -134,6 +145,13 @@ def main(argv=None) -> int:
                          "up/down. xy: hand height moves it up/down. Default: "
                          "xz for --source leap, xy for --source camera (a webcam "
                          "sees the image plane; it has no usable depth axis)")
+    ap.add_argument("--drag", action=argparse.BooleanOptionalAction,
+                    default=None,
+                    help="fist-drag. Default: off for --source camera (pinch "
+                         "misreading as a fist made clicking flaky; pinch "
+                         "already holds the button, so pinch-and-move still "
+                         "drags), on for --source leap (grab_strength is "
+                         "clean there)")
     ap.add_argument("--no-clutch", action="store_true",
                     help="pointer moves whenever a hand is tracked. Use this if "
                          "the cursor will not move at all; you lose the ratchet, "
@@ -174,6 +192,8 @@ def main(argv=None) -> int:
             args.backend = "dry-run"
         if args.duration == 120.0:      # the untouched default is too short here
             args.duration = 600.0
+        if args.drag is None:           # the tutorial teaches the fist step
+            args.drag = True
     resolve_source_defaults(args)
 
     commands_on = args.source == "camera" and not args.no_commands
@@ -197,7 +217,8 @@ def main(argv=None) -> int:
         if args.backend == "dry-run" else make_backend(args.backend)
 
     gesture_cfg = Config(hand=args.hand, plane=args.plane,
-                         clutch_enabled=not args.no_clutch)
+                         clutch_enabled=not args.no_clutch,
+                         grab_enabled=args.drag)
     if args.clutch_deg is not None:
         gesture_cfg.clutch_on_deg = args.clutch_deg
         gesture_cfg.clutch_off_deg = args.clutch_deg + 15.0
@@ -218,33 +239,91 @@ def main(argv=None) -> int:
     engine.subscribe(direct.on_intent)
 
     command_engine = None
+    screen_overlay = None
+    shortcuts = None
     if commands_on:
         from .commands import CommandEngine
         command_engine = CommandEngine(hand=args.hand,
                                        pinch_on_mm=gesture_cfg.pinch_on_mm)
         shortcuts = ShortcutDriver(backend, pane_action=args.pane)
         command_engine.subscribe(shortcuts.on_command)
+
+        # Cmd+Shift+4 shows you the region you're selecting; the finger-frame
+        # must too — on the real screen, because the always-on session has no
+        # preview window. (The overlay window is excluded from captures, so it
+        # never appears in its own frame shot.)
+        if sys.platform == "darwin" and not args.no_screen_overlay:
+            from .overlay import ScreenOverlay
+            screen_overlay = ScreenOverlay()
+
+        # `leapctl status` (and the menu bar icon) read pause state from a
+        # flag file — a signal can ask "toggle" but not "which way is it now".
+        run_dir = Path(os.environ.get("LEAPINPUT_RUN_DIR",
+                                      Path.home() / ".leapinput"))
+        paused_flag = run_dir / "paused"
+
+        def _write_paused(enabled: bool) -> None:
+            try:
+                if enabled:
+                    paused_flag.unlink(missing_ok=True)
+                else:
+                    run_dir.mkdir(parents=True, exist_ok=True)
+                    paused_flag.touch()
+            except OSError:
+                pass    # cosmetic state; never let it take down the session
+
+        _write_paused(True)  # a fresh session always starts unpaused
+
         def _announce(e):
             print(f"[command] {e.command.value} {e.data or ''}", file=sys.stderr)
             # Headless runs have no overlay, so state changes must be HEARD:
             # a silent pause is indistinguishable from "it broke".
             if e.command.value == "toggle":
                 _chime(resumed=e.data.get("enabled", True))
+                _write_paused(e.data.get("enabled", True))
+            elif e.command.value == "dictate":
+                # The mic state must be HEARD: the pose is a toggle, and a
+                # wrong guess about which state you're in means either talking
+                # to nothing or Option held while you type.
+                _play("Tink" if e.data.get("active") else "Pop")
         command_engine.subscribe(_announce)
 
+    # Signal plumbing, asserted here and RE-asserted periodically in the main
+    # loop, because two things sabotage it at the OS level:
+    #   - `leapctl on` launches us via `nohup ... &` from a non-interactive
+    #     shell, which hands us SIGINT as SIG_IGN — and Python honors an
+    #     inherited ignore, so `leapctl off` would do nothing and the session
+    #     (and the camera light) would outlive the switch.
+    #   - something in camera/mediapipe startup resets SIGUSR1's sigaction to
+    #     SIG_IGN behind Python's back (verified by reading sigaction from the
+    #     live process: OS said SIG_IGN while Python still showed the handler),
+    #     which silently killed `leapctl pause` and the menu bar's pause.
+    # signal.signal() always overwrites the OS disposition, so re-asserting is
+    # a complete cure, and at a few syscalls per second it is free.
+    import signal
+
+    def _flip(signum, frame_):
         # SIGUSR1 = pause/resume from outside — the ILY pose's terminal-side
         # twin, used by `leapctl pause` and the menu bar switch.
-        import signal
+        command_engine.enabled = not command_engine.enabled
+        _chime(resumed=command_engine.enabled)
+        _write_paused(command_engine.enabled)
+        print(f"[command] toggle {{'enabled': {command_engine.enabled}}} "
+              "(signal)", file=sys.stderr)
 
-        def _flip(signum, frame_):
-            command_engine.enabled = not command_engine.enabled
-            _chime(resumed=command_engine.enabled)
-            print(f"[command] toggle {{'enabled': {command_engine.enabled}}} "
-                  "(signal)", file=sys.stderr)
+    def _term(signum, frame_):
+        raise KeyboardInterrupt
+
+    def assert_signal_handlers() -> None:
         try:
-            signal.signal(signal.SIGUSR1, _flip)
+            signal.signal(signal.SIGINT, signal.default_int_handler)
+            signal.signal(signal.SIGTERM, _term)
+            if command_engine is not None:
+                signal.signal(signal.SIGUSR1, _flip)
         except ValueError:
-            pass        # not on the main thread; only the poses toggle then
+            pass        # not on the main thread; leapctl escalates to SIGKILL
+
+    assert_signal_handlers()
 
     tracker = None
     if args.tutorial:
@@ -272,6 +351,8 @@ def main(argv=None) -> int:
             # so framing a pane cannot also steer the cursor. Resuming is
             # jump-free: the next clutch re-syncs from the real cursor.
             command_engine.on_snapshot(snap)
+            if screen_overlay is not None:
+                screen_overlay.update(command_engine.overlay)
             ok = command_engine.enabled and not command_engine.busy
             engine.on_snapshot(snap if ok else Snapshot())
         source.subscribe(routed)
@@ -292,12 +373,27 @@ def main(argv=None) -> int:
             print("  on it. Raise/lower to move up/down; height is the cursor axis.")
         else:
             print("  Hold your hand FLAT over the device, palm down.")
-        print("  point = move   pinch = click   fist = drag   open hand = lift")
+        if args.drag:
+            print("  point = move   pinch = click   fist = drag   open hand = lift")
+        else:
+            print("  point = move   pinch = click (hold it + move = drag)   "
+                  "open hand = lift")
         if commands_on:
+            pane_label = {"screenshot": "screenshot that region -> clipboard",
+                          "window": "new window there",
+                          "tab": "new tab there"}[args.pane]
+            free = "left" if args.hand == "Right" else "right"
             print("  commands (hold the pose until the ring fills, then release):")
-            print("    frame a rectangle with both hands  = new pane there")
+            print(f"  {args.hand.lower()} (cursor) hand:")
+            print(f"    frame a rectangle with both hands  = {pane_label}")
             print("    OK sign (pinch, 3 fingers up)      = Mission Control")
-            print("    ILY sign (thumb+index+pinky) 1.5s  = pause / resume")
+            print("    ILY sign (thumb+index+pinky) 1.5s  = pause / resume"
+                  " (fires as the ring fills)")
+            print("    thumbs-up ~0.6s                    = mic ON (chime); "
+                  "thumbs-up again = mic OFF")
+            print(f"  {free} (free) hand:")
+            print("    pinch and hold = Cmd+C    V sign = Cmd+V    "
+                  "ILY = Enter")
         if args.duration:
             print(f"  auto-stops after {args.duration:.0f}s")
     where = ("into the camera view" if args.source == "camera"
@@ -339,6 +435,7 @@ def main(argv=None) -> int:
         try:
             warned_at = time.monotonic() + 4.0
             lag_warned_at = time.monotonic() + 4.0
+            sig_assert_at = time.monotonic() + 2.0
             while deadline is None or time.monotonic() < deadline:
                 if cv2 is not None:
                     frame_bgr = source.preview_frame
@@ -363,6 +460,11 @@ def main(argv=None) -> int:
                         break
                 else:
                     time.sleep(0.2)
+                if time.monotonic() > sig_assert_at:
+                    # camera/mediapipe startup clobbers SIGUSR1 to SIG_IGN at
+                    # the C level (see the signal block above): take it back.
+                    assert_signal_handlers()
+                    sig_assert_at = time.monotonic() + 2.0
                 if time.monotonic() > warned_at:
                     warn_if_stuck()
                     warned_at = time.monotonic() + 8.0
@@ -382,6 +484,12 @@ def main(argv=None) -> int:
             # Never exit holding a button — that would strand the mouse down and
             # leave the machine selecting everything the user touches.
             engine.on_snapshot(Snapshot())
+            if shortcuts is not None:
+                # Never exit holding Option — a stuck system-wide modifier
+                # breaks typing everywhere, not just here.
+                shortcuts.release_dictation()
+            if screen_overlay is not None:
+                screen_overlay.close()
             if guard:
                 guard.stop()
             if cv2 is not None:

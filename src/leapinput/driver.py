@@ -9,7 +9,6 @@ interchangeable, and can run side by side (direct pointing, agent-dispatched swi
 from __future__ import annotations
 
 import math
-import os
 import sys
 from dataclasses import dataclass
 
@@ -377,12 +376,23 @@ class ShortcutDriver:
     cursor never moves here; these are the actions a keyboard shortcut would do.
     """
 
-    # macOS virtual keycodes (kVK_*): ANSI N, ANSI T, up arrow.
-    KEY_N, KEY_T, KEY_UP = 45, 17, 126
+    # macOS virtual keycodes (kVK_*): ANSI N, T, C, V, Return, Option, up.
+    KEY_N, KEY_T, KEY_C, KEY_V = 45, 17, 8, 9
+    KEY_RETURN, KEY_UP, KEY_OPTION = 36, 126, 58
+
+    # Force-release the dictation hold if the stop edge never arrives (camera
+    # died, user walked away with the mic open): a stuck system-wide Option
+    # breaks typing everywhere. Sized for toggle-mode dictations, which run
+    # long by design.
+    MAX_DICTATION_S = 180.0
 
     def __init__(self, backend: Backend, pane_action: str = "screenshot"):
         self.backend = backend
         self.pane_action = pane_action      # "screenshot" | "window" | "tab"
+        import threading
+        self._dict_lock = threading.Lock()
+        self._dictating = False
+        self._dict_timer: object | None = None
 
     def on_command(self, event) -> None:
         name = event.command.value
@@ -390,7 +400,50 @@ class ShortcutDriver:
             self._new_pane(event.data.get("rect"))
         elif name == "mission_control":
             self.backend.key(self.KEY_UP, ctrl=True)
+        elif name == "dictate":
+            self._dictate(event.data.get("active", False))
+        elif name == "copy":
+            self.backend.key(self.KEY_C, cmd=True)
+        elif name == "paste":
+            self.backend.key(self.KEY_V, cmd=True)
+        elif name == "enter":
+            # Plain tap, NULL event source: with a real HID source, some
+            # terminals' global key handling swallows Return before it
+            # reaches the focused app (measured in claude-pet, in Warp).
+            self.backend.key(self.KEY_RETURN)
         # "toggle" is handled by the CLI's snapshot gate; nothing to press.
+
+    def _dictate(self, active: bool) -> None:
+        """Hold/release the dictation hotkey: a bare Option, the modifier every
+        push-to-talk app can be rebound to (Willow Voice here). fn — Willow's
+        stock key — is read straight from raw HID by these apps, so a
+        synthesized fn is simply not seen; Option synthesizes reliably
+        (both verified in claude-pet's voice trigger)."""
+        import threading
+        with self._dict_lock:
+            if active == self._dictating:
+                return                      # idempotent on both edges
+            self._dictating = active
+            if self._dict_timer is not None:
+                self._dict_timer.cancel()
+                self._dict_timer = None
+            self.backend.key_hold(self.KEY_OPTION, active, alt=True)
+            if active:
+                self._dict_timer = threading.Timer(
+                    self.MAX_DICTATION_S, self._dictation_watchdog)
+                self._dict_timer.daemon = True
+                self._dict_timer.start()
+
+    def _dictation_watchdog(self) -> None:
+        print(f"[command] dictation force-released after "
+              f"{self.MAX_DICTATION_S:.0f}s — stop edge never arrived",
+              file=sys.stderr)
+        self.release_dictation()
+
+    def release_dictation(self) -> None:
+        """Idempotent; the CLI calls it unconditionally on exit so the session
+        can never die holding Option down."""
+        self._dictate(False)
 
     def _new_pane(self, rect) -> None:
         """Act on the framed region: capture it, or spawn a window over it."""
@@ -424,18 +477,42 @@ def frame_region_px(rect, screen: tuple[float, float],
 
 
 def _screenshot_region(x: int, y: int, w: int, h: int) -> None:
-    """Capture the region like Cmd+Shift+4 would: PNG on the Desktop, with the
-    system shutter sound as the success feedback (matters when headless)."""
-    import subprocess
-    import time
+    """Capture the region to the CLIPBOARD (like Cmd+Ctrl+Shift+4), with the
+    system shutter sound as the success feedback (matters when headless).
+    Clipboard, not a Desktop file: the frame shot exists to be pasted
+    somewhere next, and V-sign-on-the-free-hand does exactly that.
 
-    path = os.path.expanduser(time.strftime(
-        "~/Desktop/Frame Shot %Y-%m-%d at %H.%M.%S.png"))
-    try:
-        subprocess.Popen(["screencapture", f"-R{x},{y},{w},{h}", path],
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except Exception:
-        pass
+    Failure must be as audible as success: without Screen Recording permission
+    for the app that launched the session, `screencapture` dies with "could not
+    create image from rect" — and swallowing that leaves the user framing
+    rectangles at a control that silently does nothing. Error chime + a log
+    line naming the fix instead. Runs on a thread so the wait for the exit
+    code never stalls the control loop."""
+    import subprocess
+    import threading
+
+    def run() -> None:
+        try:
+            out = subprocess.run(["screencapture", "-c",
+                                  f"-R{x},{y},{w},{h}"],
+                                 capture_output=True, text=True, timeout=10.0)
+            if out.returncode == 0 and not out.stderr.strip():
+                return
+            print(f"[command] frame shot FAILED: "
+                  f"{out.stderr.strip() or 'nothing captured'} — grant Screen "
+                  f"Recording to the app that runs the session (System "
+                  f"Settings > Privacy & Security > Screen & System Audio "
+                  f"Recording), then restart that app", file=sys.stderr)
+        except Exception as exc:
+            print(f"[command] frame shot FAILED: {exc}", file=sys.stderr)
+        try:
+            subprocess.Popen(["afplay", "/System/Library/Sounds/Basso.aiff"],
+                             stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+
+    threading.Thread(target=run, name="frame-shot", daemon=True).start()
 
 
 def _place_front_window(x: int, y: int, w: int, h: int) -> None:

@@ -1,9 +1,10 @@
 """Menu bar switch: the one-click on/off the always-on session deserves.
 
-✋ in the menu bar = hand control running; ✊ = off. The menu toggles the
-session (via scripts/leapctl, the single owner of start/stop), pauses/resumes
-without stopping (SIGUSR1 — the ILY pose's terminal-side twin), and opens the
-log. Built on rumps, which is a thin layer over the PyObjC we already ship.
+✋ in the menu bar = hand control running; 🤟 = paused (the icon shows the
+ILY pose that resumes it); ✊ = off. The menu toggles the session (via
+scripts/leapctl, the single owner of start/stop), pauses/resumes without
+stopping (SIGUSR1 — the ILY pose's terminal-side twin), and opens the log.
+Built on rumps, which is a thin layer over the PyObjC we already ship.
 
 Run it with `leapinput-menubar` (keep it in the background: `nohup ... &`).
 """
@@ -11,6 +12,7 @@ Run it with `leapinput-menubar` (keep it in the background: `nohup ... &`).
 from __future__ import annotations
 
 import subprocess
+import time
 from pathlib import Path
 
 import rumps
@@ -45,21 +47,29 @@ class LeapMenuBar(rumps.App):
         self.refresh()
         rumps.Timer(self.refresh, 3).start()    # follow leapctl/pose changes
 
-    def running(self) -> bool:
-        return ctl("status").startswith("running")
+    def state(self) -> str:
+        """'running', 'paused', or 'off' — parsed from `leapctl status`."""
+        s = ctl("status")
+        if s.startswith("running (paused"):
+            return "paused"
+        return "running" if s.startswith("running") else "off"
 
     def refresh(self, _=None) -> None:
-        on = self.running()
-        self.title = "✋" if on else "✊"
-        self.status.title = "Hand control: ON" if on else "Hand control: off"
-        self.toggle_item.title = "Turn off" if on else "Turn on"
+        state = self.state()
+        self.title = {"running": "✋", "paused": "🤟", "off": "✊"}[state]
+        self.status.title = {"running": "Hand control: ON",
+                             "paused": "Hand control: paused (hold ILY to resume)",
+                             "off": "Hand control: off"}[state]
+        self.toggle_item.title = "Turn on" if state == "off" else "Turn off"
 
     def toggle(self, _) -> None:
-        ctl("off" if self.running() else "on")
+        ctl("on" if self.state() == "off" else "off")
         self.refresh()
 
     def pause(self, _) -> None:
         ctl("pause")                            # chime says which way it went
+        time.sleep(0.3)                         # USR1 is async; let the flag land
+        self.refresh()
 
     def show_log(self, _) -> None:
         subprocess.Popen(["open", str(LOG)])

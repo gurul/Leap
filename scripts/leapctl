@@ -16,6 +16,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RUN_DIR="${LEAPINPUT_RUN_DIR:-$HOME/.leapinput}"
 PID_FILE="$RUN_DIR/leapinput.pid"
 LOG_FILE="$RUN_DIR/leapinput.log"
+PAUSED_FILE="$RUN_DIR/paused"   # touched/removed by the session on every toggle
 BIN="$ROOT/.venv/bin/leapinput"
 
 alive() { [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; }
@@ -27,7 +28,17 @@ case "${1:-status}" in
       echo "already running (pid $(cat "$PID_FILE"))"
       exit 0
     fi
+    # A stray (pid file lost, session alive) would mean two cameras open and
+    # two cursors fighting: adopt it instead of doubling up.
+    stray="$(pgrep -f "$BIN --source" 2>/dev/null | head -1 || true)"
+    if [ -n "$stray" ]; then
+      mkdir -p "$RUN_DIR"
+      echo "$stray" >"$PID_FILE"
+      echo "already running (adopted stray pid $stray)"
+      exit 0
+    fi
     mkdir -p "$RUN_DIR"
+    rm -f "$PAUSED_FILE"        # a crash can strand the flag; fresh start = unpaused
     nohup "$BIN" --source camera --backend quartz --duration 0 "$@" \
       >>"$LOG_FILE" 2>&1 &
     echo $! >"$PID_FILE"
@@ -37,18 +48,44 @@ case "${1:-status}" in
     echo "  stop for real: $(basename "$0") off"
     ;;
   off)
+    # SIGINT first (clean release), escalate if the session doesn't die —
+    # the camera light staying green after "off" is worse than a hard kill
+    # (the out-of-process guard releases buttons on every exit path anyway).
+    stop_one() {
+      local pid="$1" sig
+      for sig in INT TERM KILL; do
+        kill -0 "$pid" 2>/dev/null || return 0
+        kill "-$sig" "$pid" 2>/dev/null || return 0
+        for _ in 1 2 3 4 5; do
+          sleep 0.2
+          kill -0 "$pid" 2>/dev/null || return 0
+        done
+      done
+    }
+    stopped=0
     if alive; then
-      kill -INT "$(cat "$PID_FILE")"
-      rm -f "$PID_FILE"
-      echo "leapinput OFF — buttons released"
+      stop_one "$(cat "$PID_FILE")"
+      stopped=1
+    fi
+    # Sweep strays: sessions whose pid file was overwritten keep the camera on.
+    for pid in $(pgrep -f "$BIN --source" 2>/dev/null || true); do
+      stop_one "$pid"
+      stopped=1
+    done
+    rm -f "$PID_FILE" "$PAUSED_FILE"
+    if [ "$stopped" = 1 ]; then
+      echo "leapinput OFF — buttons released, camera closed"
     else
-      rm -f "$PID_FILE"
       echo "not running"
     fi
     ;;
   status)
     if alive; then
-      echo "running (pid $(cat "$PID_FILE"))"
+      if [ -f "$PAUSED_FILE" ]; then
+        echo "running (paused, pid $(cat "$PID_FILE"))"
+      else
+        echo "running (pid $(cat "$PID_FILE"))"
+      fi
     else
       echo "off"
     fi

@@ -35,7 +35,10 @@ Each layer only knows about the one below it. `capture.py` is the only module th
 ```
 point (1-3 fingers)   cursor moves
 pinch                 click / drag  (two quick pinches = real double-click)
-fist                  drag
+fist                  drag (--source leap; off by default on camera, where
+                      pinch misreads made clicking flaky — pinch already
+                      holds the button, so pinch-and-move drags. --drag
+                      re-enables the fist)
 open hand (4-5)       LIFT — cursor parked, reposition freely
 hand out of view      disengaged, everything released
 ```
@@ -47,10 +50,38 @@ swipes did):
 
 ```
 frame a rectangle with both hands    FRAME SHOT — screenshot of the framed
-  (thumb+index L-shapes, ~0.8s)      region to the Desktop (--pane window/tab)
+  (thumb+index L-shapes, ~0.8s)      region to the CLIPBOARD (--pane window/tab)
 OK sign (pinch, 3 fingers up, ~0.6s) Mission Control
 ILY sign (thumb+index+pinky, ~1.5s)  pause / resume all gesture control
+                                     (fires the moment the ring fills — the
+                                     chime doesn't wait for the release)
+thumbs-up (~0.6s)                    DICTATE toggle — mic ON (Tink chime);
+                                     thumbs-up again = mic OFF (Pop). Holds
+                                     the Option key in between (rebind your
+                                     dictation app — Willow Voice etc. — to a
+                                     bare Option hold). Your hand is free
+                                     while dictating: rest it, point, leave
+                                     the frame. ILY pause also closes the
+                                     mic; a 3-minute watchdog is the backstop
 ```
+
+The free hand — the one the cursor doesn't follow — is a second command
+palette (raise it alone or alongside; a hand appearing away from the cursor
+hand's last position is trusted to be the free hand):
+
+```
+pinch and hold (free hand, ~0.6s)    Cmd+C  ("grab it")
+V sign        (free hand, ~0.6s)     Cmd+V  (the literal letter; thumb ignored)
+ILY sign      (free hand, ~0.6s)     Enter  (submit what you dictated)
+```
+
+The dictation loop, borrowed from claude-pet: thumbs-up (Tink) and speak,
+thumbs-up again (Pop — Willow pastes), free-hand ILY to submit.
+
+While you hold the frame pose, the framed region is highlighted on the actual
+screen — Cmd+Shift+4-style — amber while the dwell fills, green when releasing
+will fire. The highlight window is excluded from screen capture, so it never
+appears in its own frame shot (`--no-screen-overlay` disables it).
 
 Verified by replaying 3,639 recorded frames of real use. Each pose does exactly one thing and nothing else:
 
@@ -119,12 +150,15 @@ scripts/leapctl log       # tail the session log
 
 The ILY pose (thumb+index+pinky, held ~1.5s) pauses and resumes gesture control
 in-band — no terminal needed — and `leapctl pause` does the same from a shell
-(a chime confirms which way it went). `off` is for actually stopping; the
+(a chime confirms which way it went, the moment the hold completes). The
+session mirrors the pause state to `~/.leapinput/paused`, so `leapctl status`
+reports `running (paused, …)` too. `off` is for actually stopping; the
 out-of-process guard still covers every crash path, and hand-out-of-view still
 releases everything instantly.
 
-For a one-click switch, put it in the menu bar (✋ = on, ✊ = off; the menu
-toggles, pauses, and opens the log):
+For a one-click switch, put it in the menu bar (✋ = on, 🤟 = paused — the
+icon shows the pose that resumes it, ✊ = off; the menu toggles, pauses, and
+opens the log):
 
 ```bash
 VIRTUAL_ENV=$PWD/.venv uv pip install -e '.[menubar]'
@@ -196,7 +230,7 @@ Everything measured, plus the dead ends not worth re-exploring, is in [`docs/con
 | `src/leapinput/capture.py` | Leap frames → `HandFrame`. The only module importing `leap` |
 | `src/leapinput/camera.py` | Webcam frames → the same `HandFrame`. The only module importing MediaPipe |
 | `src/leapinput/gestures.py` | `HandFrame` → `Intent`. Schmitt triggers, engagement state, the whole fiddly part |
-| `src/leapinput/commands.py` | `HandFrame` → `Command`. Pose-holds with fire-on-release: pane, Mission Control, pause |
+| `src/leapinput/commands.py` | `HandFrame` → `Command`. Pose-holds: pane + Mission Control fire on release, pause fires on ring-fill |
 | `src/leapinput/driver.py` | `Intent`/`Command` → backend calls. Gain curve, click stabilisation, pane placement |
 | `src/leapinput/actions.py` | Backend seam: `QuartzBackend` (real) and `DryRunBackend` (prints) |
 | `src/leapinput/guard.py` | The separate process that releases the button if this one dies |

@@ -24,6 +24,7 @@ class Backend(Protocol):
     def up(self, x: float, y: float) -> None: ...
     def scroll(self, dy: float) -> None: ...
     def key(self, keycode: int, *, cmd=False, shift=False, alt=False, ctrl=False) -> None: ...
+    def key_hold(self, keycode: int, down: bool, *, alt=False) -> None: ...
     @property
     def screen(self) -> tuple[float, float]: ...
 
@@ -80,6 +81,7 @@ class DryRunBackend:
     def up(self, x, y): self._pos = (x, y); self._record("up", round(x), round(y))
     def scroll(self, dy): self._record("scroll", round(dy))
     def key(self, keycode, **mods): self._record("key", keycode, mods)
+    def key_hold(self, keycode, down, **mods): self._record("key_hold", keycode, down, mods)
 
 
 class QuartzBackend:
@@ -99,6 +101,7 @@ class QuartzBackend:
             kCGEventLeftMouseDragged, kCGMouseButtonLeft, kCGHIDEventTap,
             kCGScrollEventUnitPixel, kCGEventFlagMaskCommand, kCGEventFlagMaskShift,
             kCGEventFlagMaskAlternate, kCGEventFlagMaskControl,
+            CGEventSourceCreate, kCGEventSourceStateHIDSystemState,
         )
         from Quartz.CoreGraphics import (
             CGGetActiveDisplayList, CGDisplayBounds, CGMainDisplayID,
@@ -125,6 +128,15 @@ class QuartzBackend:
             cmd=kCGEventFlagMaskCommand, shift=kCGEventFlagMaskShift,
             alt=kCGEventFlagMaskAlternate, ctrl=kCGEventFlagMaskControl,
         )
+        # For key_hold only: a real HID event source. Events built with a NULL
+        # source carry no keyboard state, and apps watching for a *held*
+        # modifier (dictation) drop them. Plain taps keep the NULL source —
+        # with a real one, some apps' global handlers swallow the key before
+        # it reaches the focused app (both learned the hard way in claude-pet).
+        try:
+            self._hid_src = CGEventSourceCreate(kCGEventSourceStateHIDSystemState)
+        except Exception:
+            self._hid_src = None
         # Geometry comes from CGDisplayBounds, NOT NSScreen.
         #
         # They disagree, and only one matches the coordinate space CGEventPost
@@ -223,6 +235,18 @@ class QuartzBackend:
             if flags:
                 cg["flags"](event, flags)
             cg["post"](cg["tap"], event)
+
+    def key_hold(self, keycode, down, *, alt=False) -> None:
+        """One edge of a held key (down=True presses, down=False releases).
+
+        Flags describe the modifier state AFTER the event, so the press
+        asserts the modifier mask and the release ALWAYS clears it — an up
+        event still asserting alternate tells macOS the key is still held,
+        and it sticks down system-wide (claude-pet shipped that bug once)."""
+        cg = self._cg
+        event = cg["keyboard"](self._hid_src, keycode, down)
+        cg["flags"](event, self._mods["alt"] if (down and alt) else 0)
+        cg["post"](cg["tap"], event)
 
 
 def make_backend(name: str, **kwargs) -> Backend:

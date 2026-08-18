@@ -7,7 +7,8 @@ engines clock off the sensor.
 
 from leapinput.capture import HandFrame, Snapshot, Vec3
 from leapinput.commands import (Command, CommandEngine, PoseHold, frame_rect,
-                                is_frame_pose, is_ily_pose, is_ok_pose)
+                                is_frame_pose, is_ily_pose, is_ok_pose,
+                                is_pinch_hold, is_thumbs_up, is_v_pose)
 
 ORIGIN = Vec3(0.0, 0.0, 0.0)
 FRAME_US = 33_000
@@ -66,6 +67,23 @@ def test_fire_on_release_only_when_full():
     # a real release commits
     assert hold.update(False, t + 0.10) is False    # grace running
     assert hold.update(False, t + 0.30) is True     # grace elapsed: FIRE
+
+
+def test_fire_on_fill_fires_mid_hold_exactly_once():
+    hold = PoseHold(arm=0.1, dwell=0.5, fire_on_fill=True)
+    t, fires = 0.0, []
+    while t < 2.0:                          # hold far past the fill
+        if hold.update(True, t):
+            fires.append(t)
+        t += 0.033
+    assert len(fires) == 1
+    assert abs(fires[0] - 0.6) < 0.05       # arm + dwell, not at release
+    # the eventual release must not fire a second time
+    assert hold.update(False, t + 0.05) is False    # grace running
+    assert hold.update(False, t + 0.30) is False    # grace elapsed: no re-fire
+    # and the next hold starts a fresh cycle
+    hold.update(True, 3.0)
+    assert hold.update(True, 3.7) is True
 
 
 def test_early_release_cancels():
@@ -135,6 +153,19 @@ def test_a_short_frame_hold_is_a_no_op():
     assert not [e for e in fired if e.command is Command.NEW_PANE]
 
 
+def test_ily_pause_fires_while_still_holding_the_pose():
+    """The chime must not wait for the release — pause commits at ring-fill."""
+    engine = CommandEngine(hand="Right")
+    fired = []
+    engine.subscribe(lambda e: fired.append(e))
+    t = 0
+    while t / 1e6 < 2.0:                    # ILY held the whole time, no release
+        t += FRAME_US
+        engine.on_snapshot(Snapshot(right=frame("Right", t, ILY)))
+    toggles = [e for e in fired if e.command is Command.TOGGLE]
+    assert len(toggles) == 1 and toggles[0].data["enabled"] is False
+
+
 def test_ily_toggles_off_and_back_on():
     engine = CommandEngine(hand="Right")
     fired = hold_release(
@@ -170,3 +201,142 @@ def test_open_hand_alone_fires_nothing():
     fired = hold_release(
         engine, lambda t: Snapshot(right=frame("Right", t, OPEN)), hold_s=2.0)
     assert fired == []
+
+
+# --- dictation (thumbs-up push-to-talk) --------------------------------------
+
+THUMBS_UP = (True, False, False, False, False)
+
+
+def test_thumbs_up_toggles_the_mic_on_then_off():
+    engine = CommandEngine(hand="Right")
+    fired = []
+    engine.subscribe(lambda e: fired.append(e))
+    t = 0
+    def feed(seconds, extended):
+        nonlocal t
+        end = t / 1e6 + seconds
+        while t / 1e6 < end:
+            t += FRAME_US
+            engine.on_snapshot(Snapshot(right=frame("Right", t, extended)))
+    feed(1.5, THUMBS_UP)                    # long hold: fires ONCE (mic on)
+    feed(0.5, OPEN)                         # release: mic stays on
+    edges = [e.data["active"] for e in fired if e.command is Command.DICTATE]
+    assert edges == [True]
+    feed(1.0, THUMBS_UP)                    # second thumbs-up: mic off
+    edges = [e.data["active"] for e in fired if e.command is Command.DICTATE]
+    assert edges == [True, False]
+
+
+def test_short_thumbs_up_never_opens_the_mic():
+    engine = CommandEngine(hand="Right")
+    fired = hold_release(
+        engine, lambda t: Snapshot(right=frame("Right", t, THUMBS_UP)), hold_s=0.3)
+    assert not [e for e in fired if e.command is Command.DICTATE]
+
+
+def test_hand_is_free_while_dictating():
+    """The toggle's whole point: after mic-on the hand can vanish, rest, or
+    point without closing the mic — only another thumbs-up (or pause) does."""
+    wall = {"t": 0.0}
+    engine = CommandEngine(hand="Right", clock=lambda: wall["t"])
+    fired = []
+    engine.subscribe(lambda e: fired.append(e))
+    t = 0
+    while t / 1e6 < 1.5:
+        t += FRAME_US
+        wall["t"] = t / 1e6
+        engine.on_snapshot(Snapshot(right=frame("Right", t, THUMBS_UP)))
+    for _ in range(30):                     # hand gone: empty snapshots
+        wall["t"] += FRAME_US / 1e6
+        engine.on_snapshot(Snapshot())
+    t = int(wall["t"] * 1e6)
+    for _ in range(30):                     # hand back, pointing around
+        t += FRAME_US
+        wall["t"] = t / 1e6
+        engine.on_snapshot(Snapshot(right=frame(
+            "Right", t, (False, True, False, False, False))))
+    edges = [e.data["active"] for e in fired if e.command is Command.DICTATE]
+    assert edges == [True]                  # mic never closed
+
+
+def test_pausing_stops_dictation():
+    engine = CommandEngine(hand="Right")
+    fired = []
+    engine.subscribe(lambda e: fired.append(e))
+    t = 0
+    while t / 1e6 < 1.0:                    # mic open, pose still held
+        t += FRAME_US
+        engine.on_snapshot(Snapshot(right=frame("Right", t, THUMBS_UP)))
+    engine.enabled = False                  # leapctl pause / SIGUSR1
+    t += FRAME_US
+    engine.on_snapshot(Snapshot(right=frame("Right", t, THUMBS_UP)))
+    edges = [e.data["active"] for e in fired if e.command is Command.DICTATE]
+    assert edges == [True, False]
+
+
+# --- free-hand clipboard (pinch-hold copy, V-sign paste) ---------------------
+
+V_POSE = (False, True, True, False, False)
+
+
+def test_free_hand_pinch_hold_copies():
+    engine = CommandEngine(hand="Right", pinch_on_mm=50.0)
+    fired = hold_release(
+        engine,
+        lambda t: Snapshot(left=frame("Left", t, (False, True, True, True, True),
+                                      pinch=30.0)),
+        hold_s=0.9)
+    assert [e for e in fired if e.command is Command.COPY]
+    assert not [e for e in fired if e.command is Command.MISSION_CONTROL]
+
+
+def test_free_hand_v_sign_pastes():
+    engine = CommandEngine(hand="Right")
+    fired = hold_release(
+        engine, lambda t: Snapshot(left=frame("Left", t, V_POSE)), hold_s=0.9)
+    assert [e for e in fired if e.command is Command.PASTE]
+
+
+def test_cursor_hand_v_sign_does_not_paste():
+    """Index+middle on the cursor hand is nearly the pointing posture — the
+    clipboard namespace is the free hand ONLY."""
+    engine = CommandEngine(hand="Right")
+    fired = hold_release(
+        engine, lambda t: Snapshot(right=frame("Right", t, V_POSE)), hold_s=0.9)
+    assert not [e for e in fired if e.command is Command.PASTE]
+
+
+def test_new_pose_predicates():
+    assert is_thumbs_up(frame(extended=THUMBS_UP))
+    assert not is_thumbs_up(frame(extended=(False,) * 5))   # a fist is a drag
+    assert is_v_pose(frame(extended=V_POSE))
+    # Thumb is ignored — a natural peace sign often reads thumb-out.
+    assert is_v_pose(frame(extended=(True, True, True, False, False)))
+    assert not is_v_pose(frame(extended=L_POSE))
+    assert not is_v_pose(frame(extended=OPEN))
+    # Deliberate pinch: closed thumb-index with a back finger up...
+    assert is_pinch_hold(frame(extended=(False, False, True, False, False),
+                               pinch=30.0), 50.0)
+    # ...but a slack fully-curled hand with the thumb near the index is not.
+    assert not is_pinch_hold(frame(extended=(False,) * 5, pinch=30.0), 50.0)
+    assert not is_pinch_hold(frame(extended=(False, False, True, False, False),
+                                   pinch=70.0), 50.0)
+
+
+def test_free_hand_ily_fires_enter_not_pause():
+    engine = CommandEngine(hand="Right")
+    fired = hold_release(
+        engine, lambda t: Snapshot(left=frame("Left", t, ILY)), hold_s=0.9)
+    assert [e for e in fired if e.command is Command.ENTER]
+    assert not [e for e in fired if e.command is Command.TOGGLE]
+
+
+def test_cursor_hand_ily_pauses_and_never_enters():
+    engine = CommandEngine(hand="Right")
+    fired = hold_release(
+        engine, lambda t: Snapshot(right=frame("Right", t, ILY)), hold_s=2.0)
+    assert [e for e in fired if e.command is Command.TOGGLE]
+    assert not [e for e in fired if e.command is Command.ENTER]
+
+

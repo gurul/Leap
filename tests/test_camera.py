@@ -327,3 +327,29 @@ def test_a_distant_hand_reads_as_below_the_span_gate():
     far = pose_signals(OPEN, image_hand(0.02))
     assert near.span_img > MIN_SPAN_IMG
     assert far.span_img < MIN_SPAN_IMG
+
+
+# --- lone-hand side: continuity vs label (2026-08-18) ------------------------
+
+def test_lone_hand_continuous_with_cursor_hand_keeps_identity():
+    """The label-flap case: mid-pinch the label flips, but the hand is where
+    the cursor hand just was — identity wins."""
+    from leapinput.camera import lone_hand_side
+    side = lone_hand_side("Left", "Right", prev_wrist=(0.50, 0.50),
+                          wrist=(0.52, 0.51), elapsed_us=33_000)
+    assert side == "Right"
+
+
+def test_lone_free_hand_raised_alone_is_believed():
+    """Raising ONLY the left hand must read as Left or the free-hand poses
+    (clipboard, enter) are unreachable — the bug that made paste 'not work'."""
+    from leapinput.camera import lone_hand_side
+    # Cursor hand never seen:
+    assert lone_hand_side("Left", "Right", prev_wrist=None,
+                          wrist=(0.3, 0.5), elapsed_us=0) == "Left"
+    # Cursor hand seen long ago:
+    assert lone_hand_side("Left", "Right", prev_wrist=(0.7, 0.5),
+                          wrist=(0.68, 0.5), elapsed_us=2_000_000) == "Left"
+    # Cursor hand recent but ELSEWHERE in the frame:
+    assert lone_hand_side("Left", "Right", prev_wrist=(0.8, 0.6),
+                          wrist=(0.2, 0.4), elapsed_us=33_000) == "Left"

@@ -187,6 +187,29 @@ def resolve_side(category_name: str, n_detected: int,
     return "Right" if category_name == "Left" else "Left"
 
 
+def lone_hand_side(label_side: str, assume: Optional[str],
+                   prev_wrist: Optional[tuple[float, float]],
+                   wrist: tuple[float, float], elapsed_us: float,
+                   max_gap_us: float = 500_000, max_jump: float = 0.18) -> str:
+    """Refined side for a LONE detection, when free-hand poses are in play.
+
+    resolve_side's blanket "a lone hand is the configured hand" makes the free
+    hand's own poses (clipboard) unreachable: raise only the left hand and it
+    is labelled Right. But the assumption exists for a real reason — labels
+    flap on fists and pinches. Continuity separates the two cases: the
+    configured hand wins only when the detection is where that hand just WAS
+    (the flap, mid-gesture); a hand appearing fresh, away from it, is believed
+    to be what the label says. Wrist positions are normalized image coords, so
+    the jump threshold is a fraction of the frame."""
+    if assume is None:
+        return label_side
+    if prev_wrist is not None and elapsed_us <= max_gap_us:
+        dx, dy = wrist[0] - prev_wrist[0], wrist[1] - prev_wrist[1]
+        if dx * dx + dy * dy <= max_jump * max_jump:
+            return assume
+    return label_side
+
+
 def _dist(a, b) -> float:
     return math.sqrt((a.x - b.x) ** 2 + (a.y - b.y) ** 2 + (a.z - b.z) ** 2)
 
@@ -439,6 +462,10 @@ class CameraSource:
                              min_tracking_confidence)
         self._subscribers: list[Callable[[Snapshot], None]] = []
         self._lock = threading.Lock()
+        # Last wrist position per side (normalized image coords + t_us), the
+        # continuity signal lone_hand_side uses to tell a label flap from the
+        # free hand raised alone.
+        self._last_wrist: dict[str, tuple[float, float, int]] = {}
         self.latest = Snapshot()
         self.frames = 0
         # Latest annotated BGR frame (numpy), written by the capture thread. On
@@ -566,8 +593,19 @@ class CameraSource:
             for handedness, img_lms, wld_lms in zip(
                     result.handedness, result.hand_landmarks,
                     result.hand_world_landmarks):
+                n = len(result.handedness)
                 side = resolve_side(handedness[0].category_name,
-                                    len(result.handedness), self._hand)
+                                    n, self._hand)
+                if n == 1 and self._hand is not None and self._two_hands:
+                    # Free-hand poses exist: a lone detection may genuinely
+                    # be the OTHER hand. Identity wins only on continuity.
+                    lw = self._last_wrist.get(self._hand)
+                    side = lone_hand_side(
+                        resolve_side(handedness[0].category_name, 2, None),
+                        self._hand,
+                        None if lw is None else lw[:2],
+                        (img_lms[0].x, img_lms[0].y),
+                        now_us - (lw[2] if lw is not None else 0))
                 sig = pose_signals(wld_lms, img_lms,
                                    aspect=bgr.shape[0] / bgr.shape[1])
                 if sig.span_img is not None and sig.span_img < MIN_SPAN_IMG:
@@ -576,6 +614,7 @@ class CameraSource:
                                      now_us, prev=self._prev.get(side),
                                      tuning=self._tuning, signals=sig)
                 self._prev[side] = frame
+                self._last_wrist[side] = (img_lms[0].x, img_lms[0].y, now_us)
                 self.latest_signals[side] = sig
                 setattr(snap, side.lower(), frame)
             # MediaPipe occlusion failures are binary whole-hand dropouts of a

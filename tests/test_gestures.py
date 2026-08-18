@@ -531,3 +531,84 @@ def test_clutch_bypass_is_reachable_in_finger_mode():
                                                 extended=(True,) * 5)))
     assert Intent.CLUTCH_DOWN in seen
     assert Intent.POINT_MOVE in seen
+
+
+# --- no-drag mode: pinch is the only button (2026-08-18) ---------------------
+
+def test_no_drag_keeps_the_fist_inert():
+    """grab_enabled=False: a fist neither presses the button nor lifts the
+    mouse — it just moves the cursor like pointing does."""
+    seen = ladder(GestureEngine(cfg_fingers(grab_enabled=False)), [1, 0])
+    assert Intent.GRAB_DOWN not in seen
+    assert Intent.CLUTCH_UP not in seen
+
+
+def test_no_drag_never_steals_a_held_pinch():
+    """With the fist inert there is no pinch->fist handover: a latched pinch
+    whose finger count collapses to 0 keeps the button held (the drag), and
+    releases only when the pinch opens."""
+    engine = GestureEngine(cfg_fingers(grab_enabled=False,
+                                       pinch_min_strength=0.0))
+    seen = []
+    engine.subscribe(lambda e: seen.append(e.intent))
+    t = 0
+    def feed(n, ext, pinch):
+        nonlocal t
+        for _ in range(n):
+            t += 9000
+            engine.on_snapshot(Snapshot(right=frame(
+                timestamp=t, extended=ext, pinch_distance=pinch,
+                pinch_strength=0.9)))
+    feed(30, (True, True, False, False, False), 80.0)   # engaged, open pinch
+    feed(30, (True, True, False, False, False), 10.0)   # pinch: button down
+    assert Intent.SELECT_DOWN in seen
+    feed(30, (False,) * 5, 10.0)                        # collapses to a fist
+    assert Intent.SELECT_UP not in seen                 # still dragging
+    assert Intent.GRAB_DOWN not in seen
+    feed(30, (True, True, False, False, False), 80.0)   # pinch opens
+    assert Intent.SELECT_UP in seen
+
+
+# --- pinch release assist (2026-08-18) ---------------------------------------
+
+def _pinch_frames(engine, distances, ext=(False, True, True, False, False)):
+    seen = []
+    engine.subscribe(lambda e: seen.append(e.intent))
+    t = 0
+    for d in distances:
+        t += 9000
+        engine.on_snapshot(Snapshot(right=frame(
+            timestamp=t, extended=ext, pinch_distance=d, pinch_strength=0.9)))
+    return seen
+
+
+def test_relaxed_half_open_hand_releases_the_click():
+    """After a click, a naturally relaxed hand parks INSIDE the 50-68mm
+    hysteresis band and used to hold the button forever. Sustained distance
+    above the engage threshold is release intent."""
+    engine = GestureEngine(cfg_fingers())
+    seen = _pinch_frames(engine,
+                         [80.0] * 20 + [10.0] * 20    # click
+                         + [55.0] * 40)               # relaxed: in the band
+    assert Intent.SELECT_DOWN in seen
+    assert Intent.SELECT_UP in seen                   # assist released it
+
+
+def test_a_real_pinch_drag_is_never_assist_released():
+    engine = GestureEngine(cfg_fingers())
+    seen = _pinch_frames(engine,
+                         [80.0] * 20 + [16.0] * 300)  # 2.7s held pinch
+    assert Intent.SELECT_DOWN in seen
+    assert Intent.SELECT_UP not in seen
+
+
+def test_a_noise_spike_inside_the_band_does_not_release():
+    """1-2 frames above the engage threshold mid-drag are landmark noise
+    (the reason the hysteresis band exists); the assist must wait them out."""
+    engine = GestureEngine(cfg_fingers())
+    seen = _pinch_frames(engine,
+                         [80.0] * 20 + [16.0] * 30
+                         + [55.0] * 2                 # 18ms spike
+                         + [16.0] * 30)
+    assert Intent.SELECT_DOWN in seen
+    assert Intent.SELECT_UP not in seen

@@ -494,3 +494,53 @@ def test_screenshot_pane_presses_no_keys():
         drv._screenshot_region = original
     assert captured and captured[0][2] > 0      # a real region was captured
     assert not [c for c in backend.calls if c[0] == "key"]
+
+
+# --- dictation hold and free-hand clipboard (2026-08-18) ---------------------
+
+def _shortcut_driver():
+    from leapinput import driver as drv
+    from leapinput.actions import DryRunBackend
+
+    backend = DryRunBackend()
+    return drv.ShortcutDriver(backend), backend
+
+
+def _cmd(command, **data):
+    from leapinput.commands import Command, CommandEvent
+    return CommandEvent(Command(command), 0.0, data)
+
+
+def test_dictate_holds_and_releases_option():
+    sd, backend = _shortcut_driver()
+    sd.on_command(_cmd("dictate", active=True))
+    sd.on_command(_cmd("dictate", active=False))
+    holds = [c for c in backend.calls if c[0] == "key_hold"]
+    assert holds == [("key_hold", sd.KEY_OPTION, True, {"alt": True}),
+                     ("key_hold", sd.KEY_OPTION, False, {"alt": True})]
+    assert sd._dict_timer is None               # watchdog disarmed with the key
+
+
+def test_dictate_edges_are_idempotent():
+    sd, backend = _shortcut_driver()
+    sd.on_command(_cmd("dictate", active=True))
+    sd.on_command(_cmd("dictate", active=True))     # duplicate start
+    sd.release_dictation()
+    sd.release_dictation()                          # duplicate stop
+    holds = [c for c in backend.calls if c[0] == "key_hold"]
+    assert [h[2] for h in holds] == [True, False]
+
+
+def test_copy_paste_press_cmd_c_and_v():
+    sd, backend = _shortcut_driver()
+    sd.on_command(_cmd("copy"))
+    sd.on_command(_cmd("paste"))
+    keys = [c for c in backend.calls if c[0] == "key"]
+    assert keys == [("key", sd.KEY_C, {"cmd": True}),
+                    ("key", sd.KEY_V, {"cmd": True})]
+
+
+def test_enter_taps_return():
+    sd, backend = _shortcut_driver()
+    sd.on_command(_cmd("enter"))
+    assert ("key", sd.KEY_RETURN, {}) in backend.calls

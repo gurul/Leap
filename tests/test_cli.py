@@ -12,7 +12,7 @@ from leapinput.cli import resolve_source_defaults
 
 def parse(source: str, *extra: str) -> argparse.Namespace:
     ns = argparse.Namespace(source=source, plane=None, point=None,
-                            invert_x=None, invert_z=None)
+                            invert_x=None, invert_z=None, drag=None)
     for flag in extra:
         key, _, val = flag.partition("=")
         setattr(ns, key, val == "True")
@@ -26,6 +26,7 @@ def test_leap_defaults_keep_the_measured_inversion():
     assert ns.invert_z is False
     assert ns.plane == "xz"
     assert ns.point == "index"
+    assert ns.drag is True          # grab_strength is clean on the Leap
 
 
 def test_camera_defaults():
@@ -34,6 +35,7 @@ def test_camera_defaults():
     assert ns.invert_z is False
     assert ns.plane == "xy"
     assert ns.point == "knuckles"
+    assert ns.drag is False         # camera: pinch is the only button
 
 
 def test_explicit_flags_override_both_directions():
