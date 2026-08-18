@@ -106,6 +106,22 @@ Then calibrate, because the camera thresholds ship as guesses and your hand is t
 
 A few prompted rounds of open/point/pinch/fist, and it fits your personal thresholds into `camera_tuning.json` (gitignored), which the camera source loads automatically.
 
+### Always-on
+
+When it's good enough to live with, run it as a persistent session:
+
+```bash
+scripts/leapctl on        # detached, no deadline, survives the terminal
+scripts/leapctl status
+scripts/leapctl off       # clean stop: buttons released
+scripts/leapctl log       # tail the session log
+```
+
+The ILY pose (thumb+index+pinky, held ~1s) pauses and resumes gesture control
+in-band — no terminal needed. `off` is for actually stopping; the out-of-process
+guard still covers every crash path, and hand-out-of-view still releases
+everything instantly.
+
 ## What the webcam costs you
 
 | | Leap Motion | webcam |
@@ -177,7 +193,7 @@ Everything measured, plus the dead ends not worth re-exploring, is in [`docs/con
 | `src/leapinput/guard.py` | The separate process that releases the button if this one dies |
 | `src/leapinput/oneeuro.py` | Vendored 1€ filter — adaptive smoothing, heavy when slow, light when fast |
 | `src/leapinput/{doctor,viz,record,calibrate}.py` | Diagnosis, live view, corpus capture, threshold fitting |
-| `scripts/` | `setup.sh` (reproducible env) · `verify-env.sh` (drift check) |
+| `scripts/` | `setup.sh` (reproducible env) · `verify-env.sh` (drift check) · `leapctl` (always-on on/off switch) |
 | `docs/context/` | Durable measured facts: [environment](docs/context/environment.md) · [interaction model](docs/context/interaction.md) · [testing](docs/context/testing.md) · [2026-08-18 strengthening pass](docs/context/strengthening-2026-08-18.md) |
 | `docs/` | [Build plan](docs/plan.md) · [OSS survey dossier](docs/oss-dossier.md) |
 

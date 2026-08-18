@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# leapctl — the on/off switch for an always-on hand-control session.
+#
+#   leapctl on [extra flags]   start (detached, no deadline, survives the terminal)
+#   leapctl off                stop cleanly (SIGINT -> buttons released; the
+#                              out-of-process guard covers every other exit)
+#   leapctl status             running or not
+#   leapctl log [n]            tail the session log
+#
+# While running, the ILY pose (thumb+index+pinky, held 1s) pauses/resumes all
+# gesture control in-band — use that for quick toggling; `off` for actually
+# stopping. Dry-run practice room: `leapctl on --backend dry-run --preview`.
+
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+RUN_DIR="${LEAPINPUT_RUN_DIR:-$HOME/.leapinput}"
+PID_FILE="$RUN_DIR/leapinput.pid"
+LOG_FILE="$RUN_DIR/leapinput.log"
+BIN="$ROOT/.venv/bin/leapinput"
+
+alive() { [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; }
+
+case "${1:-status}" in
+  on)
+    shift || true
+    if alive; then
+      echo "already running (pid $(cat "$PID_FILE"))"
+      exit 0
+    fi
+    mkdir -p "$RUN_DIR"
+    nohup "$BIN" --source camera --backend quartz --duration 0 "$@" \
+      >>"$LOG_FILE" 2>&1 &
+    echo $! >"$PID_FILE"
+    disown
+    echo "leapinput ON (pid $(cat "$PID_FILE")) — log: $LOG_FILE"
+    echo "  quick pause/resume without stopping: hold the ILY pose ~1s"
+    echo "  stop for real: $(basename "$0") off"
+    ;;
+  off)
+    if alive; then
+      kill -INT "$(cat "$PID_FILE")"
+      rm -f "$PID_FILE"
+      echo "leapinput OFF — buttons released"
+    else
+      rm -f "$PID_FILE"
+      echo "not running"
+    fi
+    ;;
+  status)
+    if alive; then
+      echo "running (pid $(cat "$PID_FILE"))"
+    else
+      echo "off"
+    fi
+    ;;
+  log)
+    tail -n "${2:-40}" "$LOG_FILE"
+    ;;
+  *)
+    echo "usage: leapctl [on [flags...] | off | status | log [n]]" >&2
+    exit 2
+    ;;
+esac
