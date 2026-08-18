@@ -216,3 +216,114 @@ def test_engine_runs_the_full_vocabulary_from_camera_frames():
                    Intent.SELECT_UP, Intent.CLUTCH_UP, Intent.DISENGAGE), seen
     assert Intent.POINT_MOVE in seen
     assert Intent.GRAB_DOWN not in seen     # nothing ever read as a fist
+
+
+# --- isotropy (plan item 2, 2026-08-18) --------------------------------------
+
+def test_equal_physical_motion_maps_to_equal_virtual_mm():
+    """One centimetre of real hand travel must produce the same virtual mm
+    horizontally and vertically. A 640x480 frame is 4:3, so equal PHYSICAL
+    motion is equal FRACTIONS of width and height only when the plane constants
+    keep the same mm-per-pixel on both axes (PLANE_Y_MM = PLANE_X_MM * 480/640).
+    The old 320x300 pair made vertical ~25% hotter than horizontal."""
+    assert PLANE_Y_MM == PLANE_X_MM * 480.0 / 640.0
+
+    # A physical step of the same pixel count on each axis: 48px of a 640px
+    # width is dx=0.075 normalized; 48px of a 480px height is dy=0.1.
+    a = handframe_of(_image(0.5, 0.5), OPEN, "Right", 1, 1_000)
+    bx = handframe_of(_image(0.575, 0.5), OPEN, "Right", 2, 34_000)
+    by = handframe_of(_image(0.5, 0.4), OPEN, "Right", 3, 67_000)
+    dx = abs(bx.palm.x - a.palm.x)
+    dy = abs(by.palm.y - a.palm.y)
+    assert abs(dx - dy) < 1e-9, f"anisotropic plane: {dx:.2f}mm vs {dy:.2f}mm"
+
+
+# --- handedness identity (plan item 5, 2026-08-18) ---------------------------
+
+def test_resolve_side_trusts_identity_over_a_flapping_label():
+    """One visible hand + a configured side: the label may flip every frame
+    (it does, on fists and pinches) without the hand changing identity."""
+    from leapinput.camera import resolve_side
+    for label in ("Left", "Right", "Left", "Left", "Right"):
+        assert resolve_side(label, 1, "Right") == "Right"
+
+
+def test_resolve_side_keeps_the_mirror_swap_for_two_hands():
+    """Two detections: the un-mirrored-image label swap still applies."""
+    from leapinput.camera import resolve_side
+    assert resolve_side("Left", 2, "Right") == "Right"
+    assert resolve_side("Right", 2, "Right") == "Left"
+    assert resolve_side("Left", 1, None) == "Right"    # unconfigured: swap only
+
+
+def test_a_label_flap_does_not_release_a_drag():
+    """Six mid-drag frames whose labels flip: routed through resolve_side the
+    configured hand never vanishes, so the engine never releases the grab."""
+    from leapinput.camera import resolve_side
+
+    engine = GestureEngine(Config(plane="xy", clutch_mode="fingers",
+                                  engage_dwell=0.0))
+    seen = []
+    engine.subscribe(lambda e: seen.append(e.intent))
+    t = 0
+    labels = ["Left", "Right", "Left", "Right", "Left", "Right"] * 5
+    for label in labels:
+        t += 33_000
+        side = resolve_side(label, 1, "Right")
+        f = handframe_of(_image(0.5, 0.5), FIST, side, 1, t)
+        engine.on_snapshot(Snapshot(right=f))
+    assert Intent.GRAB_DOWN in seen
+    assert Intent.GRAB_UP not in seen
+    assert Intent.DISENGAGE not in seen
+
+
+# --- dropout restamping (plan item 6, 2026-08-18) ----------------------------
+
+def test_a_release_dwell_completes_through_a_dropout():
+    """The engine clocks off frame timestamps. A dropout used to re-serve the
+    held frame with its OLD stamp, freezing the clock and stalling every
+    pending dwell. Restamped holds keep time moving: an open hand followed by
+    a short dropout still lifts within finger_lift_hold of the open hand."""
+    import dataclasses as dc
+
+    engine = GestureEngine(Config(plane="xy", clutch_mode="fingers",
+                                  engage_dwell=0.0, finger_hold=0.0,
+                                  finger_lift_hold=0.10))
+    seen = []
+    engine.subscribe(lambda e: seen.append(e.intent))
+    t = 0
+    fist = handframe_of(_image(0.5, 0.5), FIST, "Right", 1, 0)
+    open_hand = handframe_of(_image(0.5, 0.5), OPEN, "Right", 1, 0)
+    for _ in range(10):                 # drag
+        t += 33_000
+        engine.on_snapshot(Snapshot(right=dc.replace(fist, timestamp=t)))
+    t += 33_000                         # one frame of deliberate open hand
+    engine.on_snapshot(Snapshot(right=dc.replace(open_hand, timestamp=t)))
+    # Dropout: the capture layer re-serves the open hand RESTAMPED, as
+    # CameraSource now does. Time advances, so the lift dwell can elapse.
+    for _ in range(6):
+        t += 33_000
+        engine.on_snapshot(Snapshot(right=dc.replace(open_hand, timestamp=t)))
+    assert Intent.GRAB_UP in seen
+    assert Intent.CLUTCH_UP in seen
+
+
+# --- span depth gate (2026-08-18) --------------------------------------------
+
+def test_a_distant_hand_reads_as_below_the_span_gate():
+    """A hand across the room projects a tiny knuckle span; the capture loop
+    ignores it (span_img < MIN_SPAN_IMG) so a background person can never grab
+    the cursor. A hand at working distance passes comfortably."""
+    from leapinput.camera import MIN_SPAN_IMG, pose_signals
+
+    def image_hand(scale: float) -> list[Vec3]:
+        # Index MCP (5) and pinky MCP (17) separated by `scale` in image space.
+        lms = [Vec3(0.5, 0.5, 0.0)] * 21
+        lms[5] = Vec3(0.5 - scale / 2, 0.5, 0.0)
+        lms[17] = Vec3(0.5 + scale / 2, 0.5, 0.0)
+        return lms
+
+    near = pose_signals(OPEN, image_hand(0.10))
+    far = pose_signals(OPEN, image_hand(0.02))
+    assert near.span_img > MIN_SPAN_IMG
+    assert far.span_img < MIN_SPAN_IMG

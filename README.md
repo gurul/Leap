@@ -10,12 +10,16 @@ Touchless mice are a graveyard of demos that feel magical for ten seconds and un
 │  ~111 fps   │  │  ┌──────────┐  ┌─────────┐ │  └──────────────┘
 └─────────────┘  ├─▶│ HandFrame│─▶│ gestures│─┤
 ┌─────────────┐  │  │ (plain   │  │  Schmitt│ │  ┌──────────────┐
-│   webcam    │──┘  │  data)   │  │ triggers│ └──│ShortcutDriver│── Spaces / app switcher
+│   webcam    │──┘  │  data)   │  │ triggers│ └──│ShortcutDriver│── pane / Mission Control
 │  ~30 fps    │     └──────────┘  └────┬────┘    └──────┬───────┘
-└─────────────┘                        │ Intent         │
-                                       ▼                ▼
-                                 ┌───────────────────────────┐
-                                 │ Backend: dry-run │ Quartz │──▶ CGEventPost
+└─────────────┘          │             │ Intent         ▲ Command
+                         │             ▼                │
+                         │  ┌─────────────────┐  ┌──────┴───────┐
+                         └─▶│ commands        │  │              │
+                            │ pose-holds ─────┼──┘              │
+                            └─────────────────┘                 │
+                                 ┌───────────────────────────┐  │
+                                 │ Backend: dry-run │ Quartz │◀─┴─▶ CGEventPost
                                  └───────────────────────────┘
                                         ▲
                     ┌───────────────────┴────────────────────┐
@@ -24,16 +28,28 @@ Touchless mice are a graveyard of demos that feel magical for ten seconds and un
                     └────────────────────────────────────────┘
 ```
 
-Each layer only knows about the one below it. `capture.py` is the only module that imports `leap`; `camera.py` is the only one that imports MediaPipe. Everything above them consumes a frozen dataclass, which is why the fiddly temporal logic is tested with **107 tests in 1.6s** and no hardware and no hands.
+Each layer only knows about the one below it. `capture.py` is the only module that imports `leap`; `camera.py` is the only one that imports MediaPipe. Everything above them consumes a frozen dataclass, which is why the fiddly temporal logic is tested with **149 tests in 1.5s** and no hardware and no hands.
 
 ## The vocabulary
 
 ```
 point (1-3 fingers)   cursor moves
-pinch                 click / drag
+pinch                 click / drag  (two quick pinches = real double-click)
 fist                  drag
 open hand (4-5)       LIFT — cursor parked, reposition freely
 hand out of view      disengaged, everything released
+```
+
+And on the camera path, three **pose-hold commands** — hold the pose until the
+ring in the preview fills, release to fire (the shape every shipping mid-air UI
+converged on; nothing here can carry the hand out of frame the way the cut
+swipes did):
+
+```
+frame a rectangle with both hands    NEW PANE — a window placed over the framed
+  (thumb+index L-shapes, ~0.8s)      region (--pane tab spawns a tab instead)
+OK sign (pinch, 3 fingers up, ~0.6s) Mission Control
+ILY sign (thumb+index+pinky, ~1s)    pause / resume all gesture control
 ```
 
 Verified by replaying 3,639 recorded frames of real use. Each pose does exactly one thing and nothing else:
@@ -73,6 +89,14 @@ curl -L --create-dirs -o vendor/hand_landmarker.task \
 ```
 
 Face the camera; the view is mirrored, so moving your hand right moves the cursor right. Add `--preview` for a live window with the hand skeleton, per-finger state and a gesture readout.
+
+First time? Start in the practice room:
+
+```bash
+.venv/bin/leapinput --source camera --tutorial
+```
+
+A guided walkthrough over the live preview: point, click, drag, park, then the pose commands, one step at a time, each advancing only when the real pipeline detects the real gesture. It forces dry-run, so nothing touches your actual cursor while you learn.
 
 Then calibrate, because the camera thresholds ship as guesses and your hand is the ground truth:
 
@@ -147,15 +171,16 @@ Everything measured, plus the dead ends not worth re-exploring, is in [`docs/con
 | `src/leapinput/capture.py` | Leap frames → `HandFrame`. The only module importing `leap` |
 | `src/leapinput/camera.py` | Webcam frames → the same `HandFrame`. The only module importing MediaPipe |
 | `src/leapinput/gestures.py` | `HandFrame` → `Intent`. Schmitt triggers, engagement state, the whole fiddly part |
-| `src/leapinput/driver.py` | `Intent` → backend calls. Gain curve, edge constraint, click stabilisation |
+| `src/leapinput/commands.py` | `HandFrame` → `Command`. Pose-holds with fire-on-release: pane, Mission Control, pause |
+| `src/leapinput/driver.py` | `Intent`/`Command` → backend calls. Gain curve, click stabilisation, pane placement |
 | `src/leapinput/actions.py` | Backend seam: `QuartzBackend` (real) and `DryRunBackend` (prints) |
 | `src/leapinput/guard.py` | The separate process that releases the button if this one dies |
 | `src/leapinput/oneeuro.py` | Vendored 1€ filter — adaptive smoothing, heavy when slow, light when fast |
 | `src/leapinput/{doctor,viz,record,calibrate}.py` | Diagnosis, live view, corpus capture, threshold fitting |
 | `scripts/` | `setup.sh` (reproducible env) · `verify-env.sh` (drift check) |
-| `docs/context/` | Durable measured facts: [environment](docs/context/environment.md) · [interaction model](docs/context/interaction.md) · [testing](docs/context/testing.md) |
+| `docs/context/` | Durable measured facts: [environment](docs/context/environment.md) · [interaction model](docs/context/interaction.md) · [testing](docs/context/testing.md) · [2026-08-18 strengthening pass](docs/context/strengthening-2026-08-18.md) |
 | `docs/` | [Build plan](docs/plan.md) · [OSS survey dossier](docs/oss-dossier.md) |
 
 ## Built with
 
-Python 3.12, CFFI against `libLeapC.6`, PyObjC/Quartz for `CGEventPost`, MediaPipe Tasks + OpenCV for the camera path, pytest for the 107 hardware-free tests. The 1€ filter is Casiez, Roussel & Vogel (CHI 2012), vendored rather than depended on.
+Python 3.12, CFFI against `libLeapC.6`, PyObjC/Quartz for `CGEventPost`, MediaPipe Tasks + OpenCV for the camera path, pytest for the 149 hardware-free tests. The 1€ filter is Casiez, Roussel & Vogel (CHI 2012), vendored rather than depended on. The 2026-08-18 pass borrowed robustness patterns from [mediapipe-touchdesigner](https://github.com/torinmb/mediapipe-touchdesigner) and command shapes from shipping mid-air vocabularies — details in [the strengthening notes](docs/context/strengthening-2026-08-18.md).

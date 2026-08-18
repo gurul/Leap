@@ -409,3 +409,125 @@ def test_a_single_dropped_frame_does_not_flip_state():
         engine.on_snapshot(Snapshot(right=frame(
             timestamp=t, extended=tuple(k < n for k in range(5)))))
     assert Intent.CLUTCH_UP not in seen
+
+
+# --- settle latch: drags must move (plan item 1, 2026-08-18) -----------------
+
+def test_settle_returns_to_full_gain_once_the_pinch_latches():
+    """A held pinch sits at ~15mm — far below settle_full — for its whole
+    duration. Settle exists to stabilise a FORMING click; once the button is
+    latched the gesture is a drag and the cursor must move at full gain."""
+    engine = GestureEngine(Config(plane="xz", clutch_mode="palm",
+                                  engage_dwell=0.0, clutch_dwell=0.0))
+    seen = []
+    engine.subscribe(lambda e: seen.append(e))
+    t = 0
+    for d in (80.0, 45.0, 45.0, 45.0, 45.0, 15.0, 15.0, 15.0):
+        t += 9000
+        engine.on_snapshot(Snapshot(right=frame(timestamp=t, pinch_distance=d)))
+    downs = [i for i, e in enumerate(seen) if e.intent is Intent.SELECT_DOWN]
+    assert downs, "the pinch must latch"
+    after = [e.data["settle"] for e in seen[downs[0]:]
+             if e.intent is Intent.POINT_MOVE]
+    assert after and all(s == 1.0 for s in after), \
+        f"drag frames must carry settle=1.0, got {after}"
+
+
+def test_settle_reaches_zero_at_the_firing_threshold():
+    """The freeze must complete AT pinch_on, not 12mm past it — the click has to
+    post on a stopped cursor."""
+    cfg = Config(plane="xz", clutch_mode="palm", engage_dwell=0.0, clutch_dwell=0.0)
+    assert cfg.settle_full_mm == cfg.pinch_on_mm
+    engine = GestureEngine(cfg)
+    seen = []
+    engine.subscribe(lambda e: seen.append(e))
+    # Distance parked exactly at the on-threshold: not yet latched (dwell), but
+    # the settle ramp must already read 0.0.
+    engine.on_snapshot(Snapshot(right=frame(timestamp=9000,
+                                            pinch_distance=cfg.pinch_on_mm)))
+    moves = [e for e in seen if e.intent is Intent.POINT_MOVE]
+    assert moves and moves[-1].data["settle"] == 0.0
+
+
+def test_a_fist_drag_carries_full_gain():
+    """Fist = button down + cursor still moves. The fist collapses raw pinch
+    distance below settle_full, which used to pin gain at zero for the whole
+    drag."""
+    engine = GestureEngine(cfg_fingers())
+    seen = []
+    engine.subscribe(lambda e: seen.append(e))
+    t = 0
+    for _ in range(40):
+        t += 9000
+        engine.on_snapshot(Snapshot(right=frame(
+            timestamp=t, extended=(False,) * 5,
+            pinch_distance=15.0, grab_strength=0.95)))
+    assert any(e.intent is Intent.GRAB_DOWN for e in seen)
+    after = [e.data["settle"] for e in seen if e.intent is Intent.POINT_MOVE
+             and seen.index(e) > next(i for i, x in enumerate(seen)
+                                      if x.intent is Intent.GRAB_DOWN)]
+    assert after and all(s == 1.0 for s in after)
+
+
+# --- fist may not start a pinch (plan item 4, 2026-08-18) --------------------
+
+def test_a_closing_fist_cannot_start_a_pinch():
+    """On the way shut a fist collapses thumb-index distance through the pinch
+    band. The debounced count must win: GRAB_DOWN fires, SELECT_DOWN never."""
+    engine = GestureEngine(cfg_fingers())
+    seen = []
+    engine.subscribe(lambda e: seen.append(e.intent))
+    t = 0
+    # Two pointing frames, then the fist lands: count 0 with a collapsed,
+    # high-strength pinch signal — exactly the race that stole the drag.
+    frames = ([((False, True, False, False, False), 80.0, 0.0)] * 2
+              + [((False,) * 5, 12.0, 1.0)] * 40)
+    for ext, d, s in frames:
+        t += 9000
+        engine.on_snapshot(Snapshot(right=frame(
+            timestamp=t, extended=ext, pinch_distance=d, pinch_strength=s,
+            grab_strength=0.95 if d < 20 else 0.0)))
+    assert Intent.GRAB_DOWN in seen
+    assert Intent.SELECT_DOWN not in seen
+
+
+def test_a_latched_pinch_hands_the_button_to_the_fist_silently():
+    """Pinch closing into a fist: one physical button, no release mid-gesture.
+    The pinch latch transfers to grab without an intervening SELECT_UP."""
+    engine = GestureEngine(cfg_fingers())
+    seen = []
+    engine.subscribe(lambda e: seen.append(e.intent))
+    t = 0
+    # A real pinch first (1-2 extended, strong signal), then the fist closes.
+    for ext, d, s in ([((False, True, False, False, False), 15.0, 0.9)] * 20
+                      + [((False,) * 5, 12.0, 0.9)] * 40):
+        t += 9000
+        engine.on_snapshot(Snapshot(right=frame(
+            timestamp=t, extended=ext, pinch_distance=d, pinch_strength=s,
+            grab_strength=0.95 if ext == (False,) * 5 else 0.0)))
+    assert Intent.SELECT_DOWN in seen
+    assert Intent.GRAB_DOWN in seen
+    # No release between the two downs: the button never came up mid-gesture.
+    sel_down = seen.index(Intent.SELECT_DOWN)
+    grab_down = seen.index(Intent.GRAB_DOWN)
+    between = seen[sel_down:grab_down]
+    assert Intent.SELECT_UP not in between
+    assert Intent.GRAB_UP not in between
+
+
+# --- --no-clutch must work in finger mode (plan item 8, 2026-08-18) ----------
+
+def test_clutch_bypass_is_reachable_in_finger_mode():
+    """--no-clutch is the advertised stuck-cursor escape hatch. It used to be
+    dead code in the default finger vocabulary: even a parked open hand must
+    move the cursor under bypass."""
+    engine = GestureEngine(cfg_fingers(clutch_enabled=False))
+    seen = []
+    engine.subscribe(lambda e: seen.append(e.intent))
+    t = 0
+    for _ in range(5):
+        t += 9000
+        engine.on_snapshot(Snapshot(right=frame(timestamp=t,
+                                                extended=(True,) * 5)))
+    assert Intent.CLUTCH_DOWN in seen
+    assert Intent.POINT_MOVE in seen

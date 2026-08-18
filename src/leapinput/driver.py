@@ -120,6 +120,9 @@ class Mapping:
     # because its landmarks are noisier and arrive at a quarter of the rate.
     pointer_min_cutoff: float = 1.0
     pointer_beta: float = 0.007
+    # Cutoff for the 1€ speed estimate. Raising it makes beta open on motion
+    # onset sooner (fewer frames of lag before the filter trusts the speed).
+    pointer_d_cutoff: float = 1.0
 
 
 def _remap(value: float, lo: float, hi: float, out_hi: float) -> float:
@@ -150,19 +153,45 @@ class DirectDriver:
         # the main have negative CG origins, so clamping at 0 traps the cursor on
         # the main screen — measured here: the second display lives at (-541,-1440).
         self.min_x, self.min_y, self.max_x, self.max_y = backend.bounds
-        self.x, self.y = self.w / 2.0, self.h / 2.0
+        # Per-display rects: the union of an L-shaped layout contains a VOID,
+        # and clamping into it strands the cursor in unreachable space.
+        self.rects = list(getattr(backend, "rects", None) or [backend.bounds])
+        # Seed from where the cursor ACTUALLY is, not screen center: the first
+        # move must continue from what the user sees, never teleport.
+        self.x, self.y = self._contain(*backend.pos())
         self._filter = OneEuroPlane(freq=110.0, min_cutoff=self.map.pointer_min_cutoff,
-                                    beta=self.map.pointer_beta)
+                                    beta=self.map.pointer_beta,
+                                    d_cutoff=self.map.pointer_d_cutoff)
         self._last: tuple[float, float] | None = None   # last filtered hand x/z
         self._warned: set[str] = set()
         self._button_down = False
-        # Where the cursor was when the pinch STARTED forming. Selection motion
-        # displaces the pointer at the exact moment it must hold still — the
-        # "Heisenberg effect", measured at 30% of all mid-air pointing errors,
-        # and backdating the click to gesture onset cut errors 25% (Wolf et al.,
-        # CHI 2020). The settle ramp already slows the drift; this pins the
-        # click itself to where the user was aiming before the pinch moved it.
-        self._click_anchor: tuple[float, float] | None = None
+        # Where the cursor was when the pinch STARTED forming, plus when it was
+        # armed. Selection motion displaces the pointer at the exact moment it
+        # must hold still — the "Heisenberg effect", measured at 30% of all
+        # mid-air pointing errors, and backdating the click to gesture onset cut
+        # errors 25% (Wolf et al., CHI 2020). The settle ramp already slows the
+        # drift; this pins the click itself to where the user was aiming before
+        # the pinch moved it. The timestamp and a distance bound keep a STALE
+        # anchor from teleporting a click back to somewhere seconds old.
+        self._click_anchor: tuple[float, float, float] | None = None
+        # Where the button went down, and pixels travelled since: a release
+        # within a click's worth of travel posts AT the down position, because
+        # macOS resolves the click target on mouse-up.
+        self._down_pos: tuple[float, float] | None = None
+        self._travel = 0.0
+
+    def _contain(self, x: float, y: float) -> tuple[float, float]:
+        """Clamp to the NEAREST real display, not the union of all of them."""
+        best, best_d = None, None
+        for x0, y0, x1, y1 in self.rects:
+            cx = max(x0, min(x1 - 1.0, x))
+            cy = max(y0, min(y1 - 1.0, y))
+            d = (cx - x) ** 2 + (cy - y) ** 2
+            if best_d is None or d < best_d:
+                best, best_d = (cx, cy), d
+                if d == 0.0:
+                    break
+        return best
 
     def _gain(self, speed: float) -> float:
         lo, hi = self.map.speed_lo, self.map.speed_hi
@@ -201,9 +230,15 @@ class DirectDriver:
     # --- clutch: the ratchet ------------------------------------------------
 
     def _on_clutch_down(self, event: IntentEvent) -> None:
-        """Anchor here. The cursor does NOT jump — that is the whole point."""
+        """Anchor here. The cursor does NOT jump — that is the whole point.
+
+        Re-sync with the REAL cursor: the user may have used the trackpad since
+        the last clutch, and integrating from our phantom position would
+        teleport the cursor back to wherever we last left it.
+        """
         self._filter.reset()
         self._last = None
+        self.x, self.y = self._contain(*self.backend.pos())
 
     def _on_clutch_up(self, event: IntentEvent) -> None:
         self._last = None
@@ -212,17 +247,18 @@ class DirectDriver:
     def _on_disengage(self, event: IntentEvent) -> None:
         self._last = None
         self._click_anchor = None
-        self._press(False)          # never disengage holding the button
+        self._up()                  # never disengage holding the button
 
     # --- pointer ------------------------------------------------------------
 
     def _on_point_move(self, event: IntentEvent) -> None:
         frame = event.frame
         settle = event.data.get("settle", 1.0)
-        if settle >= 1.0:
+        if settle >= 1.0 and not self._button_down:
             self._click_anchor = None       # pinch fully open again: re-arm
         elif self._click_anchor is None and not self._button_down:
-            self._click_anchor = (self.x, self.y)   # pinch starts forming: aim is HERE
+            # Pinch starts forming: aim is HERE, and remember when.
+            self._click_anchor = (self.x, self.y, event.at)
         # Only the two plane axes are read, filtered or integrated. The off-plane
         # axis gates (engage floor, edge guard) but never contributes to position.
         p = frame.track_point(self.map.tracking_point)
@@ -234,10 +270,15 @@ class DirectDriver:
             return
 
         dx_mm, dz_mm = fx - self._last[0], vertical - self._last[1]
-        self._last = (fx, vertical)
 
         if abs(dx_mm) < self.map.deadzone_mm and abs(dz_mm) < self.map.deadzone_mm:
-            return                          # resting-hand tremor, not intent
+            # Sub-threshold: KEEP the anchor. Advancing it here consumed slow
+            # motion frame by frame, so any hand moving under ~deadzone/frame
+            # produced zero cursor motion forever — precise aiming was
+            # structurally impossible. Held back, the deltas accumulate against
+            # the stale anchor and release as one honest step.
+            return
+        self._last = (fx, vertical)
 
         if self.map.invert_x:
             dx_mm = -dx_mm
@@ -252,8 +293,10 @@ class DirectDriver:
         gain *= self._edge_factor(frame)
         if gain == 0.0:
             return
-        self.x = max(self.min_x, min(self.max_x - 1.0, self.x + dx_mm * gain))
-        self.y = max(self.min_y, min(self.max_y - 1.0, self.y + dz_mm * gain))
+        px, py = self.x, self.y
+        self.x, self.y = self._contain(self.x + dx_mm * gain, self.y + dz_mm * gain)
+        if self._button_down:
+            self._travel += math.hypot(self.x - px, self.y - py)
         self.backend.move(self.x, self.y)
 
     # --- buttons ------------------------------------------------------------
@@ -271,22 +314,54 @@ class DirectDriver:
         self._button_down = down
         (self.backend.down if down else self.backend.up)(self.x, self.y)
 
+    # Anchor trust bounds: past either, the warp does more harm than good and
+    # the click posts where the cursor actually is.
+    ANCHOR_MAX_AGE_S = 0.75
+    ANCHOR_MAX_DIST_PX = 75.0
+    # Under this much held-button travel the gesture was a CLICK, not a drag,
+    # and mouse-up is pinned back to the down position.
+    CLICK_TRAVEL_PX = 12.0
+
     def _on_select_down(self, event: IntentEvent) -> None:
         if self._click_anchor is not None:
-            self.x, self.y = self._click_anchor
-            self.backend.move(self.x, self.y)
-        self._press(True)
+            ax, ay, armed_at = self._click_anchor
+            # Warp only to a FRESH, NEARBY anchor. A slow-forming pinch or a
+            # second click in a row used to teleport the cursor back to a
+            # position seconds old.
+            if (event.at - armed_at <= self.ANCHOR_MAX_AGE_S
+                    and math.hypot(self.x - ax, self.y - ay) <= self.ANCHOR_MAX_DIST_PX):
+                self.x, self.y = ax, ay
+                self.backend.move(self.x, self.y)
+        self._down(event)
 
     def _on_select_up(self, event: IntentEvent) -> None:
-        self._press(False)
+        self._up()
+        self._click_anchor = None       # every click cycle re-arms fresh
 
     # A fist IS the button in the finger-ladder vocabulary. These were missing
     # while the vocabulary moved off pinch, so the fist emitted grab.down into
     # nothing and the click silently did nothing at all.
     def _on_grab_down(self, event: IntentEvent) -> None:
-        self._press(True)
+        self._down(event)
 
     def _on_grab_up(self, event: IntentEvent) -> None:
+        self._up()
+
+    def _down(self, event: IntentEvent) -> None:
+        self._down_pos = (self.x, self.y)
+        self._travel = 0.0
+        self._press(True)
+
+    def _up(self) -> None:
+        # macOS resolves the click target on mouse-UP. If the button barely
+        # travelled, this was a click: land the up on the same pixel as the
+        # down so late pinch-opening drift cannot drop it on a neighbour.
+        if (self._button_down and self._down_pos is not None
+                and self._travel < self.CLICK_TRAVEL_PX
+                and (self.x, self.y) != self._down_pos):
+            self.x, self.y = self._down_pos
+            self.backend.move(self.x, self.y)
+        self._down_pos = None
         self._press(False)
 
     def _on_scroll(self, event: IntentEvent) -> None:
@@ -294,26 +369,68 @@ class DirectDriver:
 
 
 class ShortcutDriver:
-    """Placeholder for discrete commands.
+    """Discrete commands -> macOS actions.
 
-    Previously mapped swipes to Spaces and the app switcher. Swipes are cut — the
-    motion leaves the tracking volume — so there is nothing to map yet. The next
-    discrete command should be a static pose held briefly, which cannot carry the
-    hand out of view. Kept so the wiring in cli.py stays honest about the gap.
+    Consumes CommandEvents from commands.CommandEngine (static pose-holds — the
+    replacement for the cut swipes, which carried the hand out of view). The
+    cursor never moves here; these are the actions a keyboard shortcut would do.
     """
 
-    def __init__(self, backend: Backend):
+    # macOS virtual keycodes (kVK_*): ANSI N, ANSI T, up arrow.
+    KEY_N, KEY_T, KEY_UP = 45, 17, 126
+
+    def __init__(self, backend: Backend, pane_action: str = "window"):
         self.backend = backend
+        self.pane_action = pane_action      # "window" | "tab"
 
-    def _edge_factor(self, frame: HandFrame) -> float:
-        """1.0 in the reliable core, fading to 0.0 at the edge of the cone."""
-        ecc = frame.eccentricity
-        ok, cap = self.map.edge_ok_deg, self.map.edge_max_deg
-        if ecc <= ok:
-            return 1.0
-        if ecc >= cap:
-            return 0.0
-        return (cap - ecc) / (cap - ok)
+    def on_command(self, event) -> None:
+        name = event.command.value
+        if name == "pane.new":
+            self._new_pane(event.data.get("rect"))
+        elif name == "mission_control":
+            self.backend.key(self.KEY_UP, ctrl=True)
+        # "toggle" is handled by the CLI's snapshot gate; nothing to press.
 
-    def on_intent(self, event: IntentEvent) -> None:
-        return None
+    def _new_pane(self, rect) -> None:
+        """Spawn the pane, then place the new window over the framed region."""
+        self.backend.key(self.KEY_T if self.pane_action == "tab" else self.KEY_N,
+                         cmd=True)
+        if rect is None or self.pane_action == "tab":
+            return
+        w, h = self.backend.screen
+        x0, y0, x1, y1 = rect
+        # Meaningful frames only: below ~15% of the screen per side the user
+        # was almost certainly not framing a region, just releasing sloppily.
+        if (x1 - x0) < 0.15 or (y1 - y0) < 0.15:
+            return
+        _place_front_window(int(x0 * w), int(y0 * h),
+                            int((x1 - x0) * w), int((y1 - y0) * h))
+
+
+def _place_front_window(x: int, y: int, w: int, h: int) -> None:
+    """Best-effort: move/resize the frontmost window via System Events.
+
+    Runs detached — window creation needs a moment to settle, and a failure
+    (no Accessibility for osascript, an app with no settable windows) must
+    never take the control loop down with it.
+    """
+    import subprocess
+    import threading
+
+    script = (
+        'delay 0.4\n'
+        'tell application "System Events"\n'
+        '  set p to first process whose frontmost is true\n'
+        f'  set position of front window of p to {{{x}, {y}}}\n'
+        f'  set size of front window of p to {{{w}, {h}}}\n'
+        'end tell'
+    )
+
+    def run() -> None:
+        try:
+            subprocess.run(["osascript", "-e", script], timeout=5.0,
+                           capture_output=True)
+        except Exception:
+            pass
+
+    threading.Thread(target=run, name="pane-place", daemon=True).start()

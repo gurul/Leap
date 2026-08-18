@@ -9,6 +9,7 @@ you are using to fix it.
 from __future__ import annotations
 
 import sys
+import time
 from typing import Protocol
 
 
@@ -16,12 +17,29 @@ class Backend(Protocol):
     def move(self, x: float, y: float) -> None: ...
     @property
     def bounds(self) -> tuple[float, float, float, float]: ...
+    @property
+    def rects(self) -> list[tuple[float, float, float, float]]: ...
+    def pos(self) -> tuple[float, float]: ...
     def down(self, x: float, y: float) -> None: ...
     def up(self, x: float, y: float) -> None: ...
     def scroll(self, dy: float) -> None: ...
     def key(self, keycode: int, *, cmd=False, shift=False, alt=False, ctrl=False) -> None: ...
     @property
     def screen(self) -> tuple[float, float]: ...
+
+
+# macOS builds double- and triple-clicks from the click-state FIELD on the
+# events, not from timing alone: two down/up pairs posted without it are two
+# single clicks no matter how fast. 0.5s / 25px mirror the system defaults.
+def next_click_state(prev_state: int, prev_up_at: float | None,
+                     prev_xy: tuple[float, float] | None,
+                     now: float, xy: tuple[float, float]) -> int:
+    if prev_up_at is None or prev_xy is None:
+        return 1
+    dx, dy = xy[0] - prev_xy[0], xy[1] - prev_xy[1]
+    if now - prev_up_at < 0.5 and dx * dx + dy * dy <= 25.0 * 25.0:
+        return prev_state + 1
+    return 1
 
 
 class DryRunBackend:
@@ -32,6 +50,7 @@ class DryRunBackend:
                  verbose: bool = False):
         self._screen = screen
         self._bounds = bounds or (0.0, 0.0, screen[0], screen[1])
+        self._pos = (screen[0] / 2.0, screen[1] / 2.0)
         self.verbose = verbose
         self.calls: list[tuple] = []
 
@@ -43,14 +62,22 @@ class DryRunBackend:
     def bounds(self) -> tuple[float, float, float, float]:
         return self._bounds
 
+    @property
+    def rects(self) -> list[tuple[float, float, float, float]]:
+        return [self._bounds]
+
+    def pos(self) -> tuple[float, float]:
+        """Where the cursor 'is': the last point moved to, seeded at center."""
+        return self._pos
+
     def _record(self, *call) -> None:
         self.calls.append(call)
         if self.verbose or call[0] != "move":
             print(f"  [dry-run] {call[0]}{call[1:]}", file=sys.stderr)
 
-    def move(self, x, y): self._record("move", round(x), round(y))
-    def down(self, x, y): self._record("down", round(x), round(y))
-    def up(self, x, y): self._record("up", round(x), round(y))
+    def move(self, x, y): self._pos = (x, y); self._record("move", round(x), round(y))
+    def down(self, x, y): self._pos = (x, y); self._record("down", round(x), round(y))
+    def up(self, x, y): self._pos = (x, y); self._record("up", round(x), round(y))
     def scroll(self, dy): self._record("scroll", round(dy))
     def key(self, keycode, **mods): self._record("key", keycode, mods)
 
@@ -66,6 +93,8 @@ class QuartzBackend:
         from Quartz.CoreGraphics import (
             CGEventCreateMouseEvent, CGEventCreateScrollWheelEvent,
             CGEventCreateKeyboardEvent, CGEventPost, CGEventSetFlags,
+            CGEventCreate, CGEventGetLocation, CGEventSetIntegerValueField,
+            kCGMouseEventClickState,
             kCGEventMouseMoved, kCGEventLeftMouseDown, kCGEventLeftMouseUp,
             kCGEventLeftMouseDragged, kCGMouseButtonLeft, kCGHIDEventTap,
             kCGScrollEventUnitPixel, kCGEventFlagMaskCommand, kCGEventFlagMaskShift,
@@ -89,6 +118,8 @@ class QuartzBackend:
             moved=kCGEventMouseMoved, ldown=kCGEventLeftMouseDown, lup=kCGEventLeftMouseUp,
             ldrag=kCGEventLeftMouseDragged, button=kCGMouseButtonLeft, tap=kCGHIDEventTap,
             pixel=kCGScrollEventUnitPixel,
+            create=CGEventCreate, location=CGEventGetLocation,
+            set_field=CGEventSetIntegerValueField, click_state=kCGMouseEventClickState,
         )
         self._mods = dict(
             cmd=kCGEventFlagMaskCommand, shift=kCGEventFlagMaskShift,
@@ -107,13 +138,25 @@ class QuartzBackend:
 
         err, ids, count = CGGetActiveDisplayList(16, None, None)
         rects = [CGDisplayBounds(d) for d in ids[:count]] if not err else [main]
+        # Per-display rects, not just the union: an L-shaped layout has a VOID
+        # inside the union rectangle, and clamping into it strands the cursor
+        # in unreachable space. The driver clamps to the nearest real display.
+        self._rects = [
+            (float(r.origin.x), float(r.origin.y),
+             float(r.origin.x + r.size.width), float(r.origin.y + r.size.height))
+            for r in rects
+        ]
         self._bounds = (
-            min(float(r.origin.x) for r in rects),
-            min(float(r.origin.y) for r in rects),
-            max(float(r.origin.x + r.size.width) for r in rects),
-            max(float(r.origin.y + r.size.height) for r in rects),
+            min(r[0] for r in self._rects),
+            min(r[1] for r in self._rects),
+            max(r[2] for r in self._rects),
+            max(r[3] for r in self._rects),
         )
         self._down = False
+        # Double/triple-click bookkeeping for kCGMouseEventClickState.
+        self._click_state = 1
+        self._last_up_at: float | None = None
+        self._last_up_xy: tuple[float, float] | None = None
 
     @property
     def screen(self) -> tuple[float, float]:
@@ -129,20 +172,41 @@ class QuartzBackend:
         """
         return self._bounds
 
-    def _mouse(self, event_type, x, y) -> None:
+    @property
+    def rects(self) -> list[tuple[float, float, float, float]]:
+        return list(self._rects)
+
+    def pos(self) -> tuple[float, float]:
+        """Where the cursor ACTUALLY is, from the window server — the user may
+        have moved it with the trackpad since we last did."""
+        p = self._cg["location"](self._cg["create"](None))
+        return (float(p.x), float(p.y))
+
+    def _mouse(self, event_type, x, y, click_state: int | None = None) -> None:
         cg = self._cg
-        cg["post"](cg["tap"], cg["mouse"](None, event_type, (x, y), cg["button"]))
+        event = cg["mouse"](None, event_type, (x, y), cg["button"])
+        if click_state is not None and click_state > 1:
+            # Without this FIELD, two fast clicks are two single clicks: macOS
+            # builds double/triple-clicks from click state, not timing alone.
+            cg["set_field"](event, cg["click_state"], click_state)
+        cg["post"](cg["tap"], event)
 
     def move(self, x, y) -> None:
         self._mouse(self._cg["ldrag"] if self._down else self._cg["moved"], x, y)
 
     def down(self, x, y) -> None:
+        self._click_state = next_click_state(
+            self._click_state, self._last_up_at, self._last_up_xy,
+            time.monotonic(), (x, y))
         self._down = True
-        self._mouse(self._cg["ldown"], x, y)
+        self._mouse(self._cg["ldown"], x, y, self._click_state)
 
     def up(self, x, y) -> None:
         self._down = False
-        self._mouse(self._cg["lup"], x, y)
+        # Same click state on BOTH events of the pair, or the up cancels it.
+        self._mouse(self._cg["lup"], x, y, self._click_state)
+        self._last_up_at = time.monotonic()
+        self._last_up_xy = (x, y)
 
     def scroll(self, dy) -> None:
         cg = self._cg
