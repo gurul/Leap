@@ -46,10 +46,10 @@ converged on; nothing here can carry the hand out of frame the way the cut
 swipes did):
 
 ```
-frame a rectangle with both hands    NEW PANE — a window placed over the framed
-  (thumb+index L-shapes, ~0.8s)      region (--pane tab spawns a tab instead)
+frame a rectangle with both hands    FRAME SHOT — screenshot of the framed
+  (thumb+index L-shapes, ~0.8s)      region to the Desktop (--pane window/tab)
 OK sign (pinch, 3 fingers up, ~0.6s) Mission Control
-ILY sign (thumb+index+pinky, ~1s)    pause / resume all gesture control
+ILY sign (thumb+index+pinky, ~1.5s)  pause / resume all gesture control
 ```
 
 Verified by replaying 3,639 recorded frames of real use. Each pose does exactly one thing and nothing else:
@@ -117,10 +117,19 @@ scripts/leapctl off       # clean stop: buttons released
 scripts/leapctl log       # tail the session log
 ```
 
-The ILY pose (thumb+index+pinky, held ~1s) pauses and resumes gesture control
-in-band — no terminal needed. `off` is for actually stopping; the out-of-process
-guard still covers every crash path, and hand-out-of-view still releases
-everything instantly.
+The ILY pose (thumb+index+pinky, held ~1.5s) pauses and resumes gesture control
+in-band — no terminal needed — and `leapctl pause` does the same from a shell
+(a chime confirms which way it went). `off` is for actually stopping; the
+out-of-process guard still covers every crash path, and hand-out-of-view still
+releases everything instantly.
+
+For a one-click switch, put it in the menu bar (✋ = on, ✊ = off; the menu
+toggles, pauses, and opens the log):
+
+```bash
+VIRTUAL_ENV=$PWD/.venv uv pip install -e '.[menubar]'
+nohup .venv/bin/leapinput-menubar >/dev/null 2>&1 &
+```
 
 ## What the webcam costs you
 

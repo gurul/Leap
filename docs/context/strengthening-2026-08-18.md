@@ -22,9 +22,9 @@ Also: a closing fist can no longer *start* a pinch latch (raw count 0 blocks new
 
 | pose | hold | action |
 |---|---|---|
-| both hands framing a rectangle (thumb+index Ls) | ~0.8 s | **new pane**: `Cmd+N`, window placed over the framed region (`--pane tab` for `Cmd+T`) |
+| both hands framing a rectangle (thumb+index Ls) | ~0.8 s | **frame shot**: screenshot of the framed region to the Desktop, with the system shutter sound (`--pane window` places a `Cmd+N` window over the region instead; `--pane tab` for `Cmd+T`) |
 | OK sign — pinch with middle+ring+pinky extended | ~0.6 s | Mission Control (`Ctrl+↑`) |
-| ILY sign — thumb+index+pinky | ~1.0 s | pause / resume all gesture control |
+| ILY sign — thumb+index+pinky | ~1.65 s | pause / resume all gesture control |
 
 Design rules, from the research: a pose must persist 0.15 s before the progress ring starts (single-frame label flicker never arms), sub-0.12 s dropouts don't cancel a hold, and release commits — holding past full keeps the abort window open. The preview draws the ring, the armed label, and the live pane rectangle. While a hold is armed the cursor engine receives an empty snapshot: framing a pane cannot also steer the pointer, and resume is jump-free because every clutch re-syncs from the real cursor.
 

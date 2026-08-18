@@ -41,6 +41,17 @@ def _overlay_status(cv2, bgr, engine, tracked, last_intent: str,
                     (255, 255, 255) if ok else (0, 191, 255), 1, cv2.LINE_AA)
 
 
+def _chime(resumed: bool) -> None:
+    """Audible pause/resume cue, best-effort and non-blocking (macOS)."""
+    import subprocess
+    sound = "Glass" if resumed else "Bottle"
+    try:
+        subprocess.Popen(["afplay", f"/System/Library/Sounds/{sound}.aiff"],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
+
 def resolve_source_defaults(args) -> None:
     """Per-source defaults for every axis-and-posture flag the user left unset.
 
@@ -104,9 +115,11 @@ def main(argv=None) -> int:
     ap.add_argument("--no-commands", action="store_true",
                     help="camera only: disable the pose-hold commands (finger-"
                          "frame pane, OK-pose Mission Control, ILY pause)")
-    ap.add_argument("--pane", choices=("window", "tab"), default="window",
-                    help="what the finger-frame gesture spawns: a new window "
-                         "placed over the framed region (default), or a tab")
+    ap.add_argument("--pane", choices=("screenshot", "window", "tab"),
+                    default="screenshot",
+                    help="what the finger-frame gesture does: screenshot the "
+                         "framed region to the Desktop (default), spawn a new "
+                         "window placed over it, or open a tab")
     ap.add_argument("--verbose", action="store_true", help="log pointer moves too")
     ap.add_argument("--invert-x", action=argparse.BooleanOptionalAction,
                     default=None,
@@ -211,9 +224,27 @@ def main(argv=None) -> int:
                                        pinch_on_mm=gesture_cfg.pinch_on_mm)
         shortcuts = ShortcutDriver(backend, pane_action=args.pane)
         command_engine.subscribe(shortcuts.on_command)
-        command_engine.subscribe(
-            lambda e: print(f"[command] {e.command.value} {e.data or ''}",
-                            file=sys.stderr))
+        def _announce(e):
+            print(f"[command] {e.command.value} {e.data or ''}", file=sys.stderr)
+            # Headless runs have no overlay, so state changes must be HEARD:
+            # a silent pause is indistinguishable from "it broke".
+            if e.command.value == "toggle":
+                _chime(resumed=e.data.get("enabled", True))
+        command_engine.subscribe(_announce)
+
+        # SIGUSR1 = pause/resume from outside — the ILY pose's terminal-side
+        # twin, used by `leapctl pause` and the menu bar switch.
+        import signal
+
+        def _flip(signum, frame_):
+            command_engine.enabled = not command_engine.enabled
+            _chime(resumed=command_engine.enabled)
+            print(f"[command] toggle {{'enabled': {command_engine.enabled}}} "
+                  "(signal)", file=sys.stderr)
+        try:
+            signal.signal(signal.SIGUSR1, _flip)
+        except ValueError:
+            pass        # not on the main thread; only the poses toggle then
 
     tracker = None
     if args.tutorial:
@@ -266,7 +297,7 @@ def main(argv=None) -> int:
             print("  commands (hold the pose until the ring fills, then release):")
             print("    frame a rectangle with both hands  = new pane there")
             print("    OK sign (pinch, 3 fingers up)      = Mission Control")
-            print("    ILY sign (thumb+index+pinky) 1s    = pause / resume")
+            print("    ILY sign (thumb+index+pinky) 1.5s  = pause / resume")
         if args.duration:
             print(f"  auto-stops after {args.duration:.0f}s")
     where = ("into the camera view" if args.source == "camera"
@@ -320,7 +351,7 @@ def main(argv=None) -> int:
                             _overlay_commands(cv2, frame_bgr,
                                               command_engine.overlay)
                             if not command_engine.enabled and tracker is None:
-                                cv2.putText(frame_bgr, "PAUSED (ILY pose 1s resumes)",
+                                cv2.putText(frame_bgr, "PAUSED (ILY pose 1.5s resumes)",
                                             (8, 30), cv2.FONT_HERSHEY_SIMPLEX,
                                             0.7, (0, 0, 230), 2, cv2.LINE_AA)
                         if tracker is not None:

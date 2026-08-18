@@ -33,7 +33,7 @@ case "${1:-status}" in
     echo $! >"$PID_FILE"
     disown
     echo "leapinput ON (pid $(cat "$PID_FILE")) — log: $LOG_FILE"
-    echo "  quick pause/resume without stopping: hold the ILY pose ~1s"
+    echo "  quick pause/resume without stopping: hold the ILY pose ~1.5s"
     echo "  stop for real: $(basename "$0") off"
     ;;
   off)
@@ -53,11 +53,20 @@ case "${1:-status}" in
       echo "off"
     fi
     ;;
+  pause|resume)
+    # One signal toggles: the session chimes low for pause, high for resume.
+    if alive; then
+      kill -USR1 "$(cat "$PID_FILE")"
+      echo "pause/resume toggled (listen for the chime)"
+    else
+      echo "not running"
+    fi
+    ;;
   log)
     tail -n "${2:-40}" "$LOG_FILE"
     ;;
   *)
-    echo "usage: leapctl [on [flags...] | off | status | log [n]]" >&2
+    echo "usage: leapctl [on [flags...] | off | status | pause | log [n]]" >&2
     exit 2
     ;;
 esac

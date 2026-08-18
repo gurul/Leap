@@ -50,7 +50,7 @@ def make_steps() -> list[Step]:
         Step("OK for Mission Control",
              "pinch with middle+ring+pinky extended, hold, release"),
         Step("ILY to pause",
-             "thumb + index + pinky out, hold 1s — everything pauses"),
+             "thumb + index + pinky out, hold ~1.5s — everything pauses"),
         Step("ILY to resume",
              "same pose again brings it back. You're in control"),
     ]

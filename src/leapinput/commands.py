@@ -153,7 +153,10 @@ class CommandEngine:
         self.enabled = True
         self.pane = PoseHold(dwell=0.65)        # ~0.8s total with arm
         self.mission = PoseHold(dwell=0.45)     # ~0.6s total
-        self.toggle = PoseHold(dwell=0.85)      # ~1.0s total: highest stakes
+        # ~1.65s total. Was ~1s, and a live headless session paused itself: a
+        # relaxed hand with middle+ring drooping reads as ILY, and one second
+        # of it is easy to produce by accident. The pause must be deliberate.
+        self.toggle = PoseHold(dwell=1.5)
         self._rect: Optional[tuple] = None      # last rect while framing
         self._now = 0.0
         self._subscribers: list[Callable[[CommandEvent], None]] = []

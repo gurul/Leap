@@ -9,6 +9,7 @@ interchangeable, and can run side by side (direct pointing, agent-dispatched swi
 from __future__ import annotations
 
 import math
+import os
 import sys
 from dataclasses import dataclass
 
@@ -379,9 +380,9 @@ class ShortcutDriver:
     # macOS virtual keycodes (kVK_*): ANSI N, ANSI T, up arrow.
     KEY_N, KEY_T, KEY_UP = 45, 17, 126
 
-    def __init__(self, backend: Backend, pane_action: str = "window"):
+    def __init__(self, backend: Backend, pane_action: str = "screenshot"):
         self.backend = backend
-        self.pane_action = pane_action      # "window" | "tab"
+        self.pane_action = pane_action      # "screenshot" | "window" | "tab"
 
     def on_command(self, event) -> None:
         name = event.command.value
@@ -392,19 +393,49 @@ class ShortcutDriver:
         # "toggle" is handled by the CLI's snapshot gate; nothing to press.
 
     def _new_pane(self, rect) -> None:
-        """Spawn the pane, then place the new window over the framed region."""
+        """Act on the framed region: capture it, or spawn a window over it."""
+        if self.pane_action == "screenshot":
+            region = frame_region_px(rect, self.backend.screen, min_frac=0.05)
+            if region is not None:
+                _screenshot_region(*region)
+            return
         self.backend.key(self.KEY_T if self.pane_action == "tab" else self.KEY_N,
                          cmd=True)
-        if rect is None or self.pane_action == "tab":
+        if self.pane_action == "tab":
             return
-        w, h = self.backend.screen
-        x0, y0, x1, y1 = rect
-        # Meaningful frames only: below ~15% of the screen per side the user
-        # was almost certainly not framing a region, just releasing sloppily.
-        if (x1 - x0) < 0.15 or (y1 - y0) < 0.15:
-            return
-        _place_front_window(int(x0 * w), int(y0 * h),
-                            int((x1 - x0) * w), int((y1 - y0) * h))
+        # Meaningful frames only for window placement: under ~15% per side the
+        # user was almost certainly just releasing sloppily.
+        region = frame_region_px(rect, self.backend.screen, min_frac=0.15)
+        if region is not None:
+            _place_front_window(*region)
+
+
+def frame_region_px(rect, screen: tuple[float, float],
+                    min_frac: float) -> tuple[int, int, int, int] | None:
+    """Normalized frame rect -> (x, y, w, h) main-screen pixels, or None when
+    the frame is too small on either side to be a deliberate region."""
+    if rect is None:
+        return None
+    x0, y0, x1, y1 = rect
+    if (x1 - x0) < min_frac or (y1 - y0) < min_frac:
+        return None
+    w, h = screen
+    return (int(x0 * w), int(y0 * h), int((x1 - x0) * w), int((y1 - y0) * h))
+
+
+def _screenshot_region(x: int, y: int, w: int, h: int) -> None:
+    """Capture the region like Cmd+Shift+4 would: PNG on the Desktop, with the
+    system shutter sound as the success feedback (matters when headless)."""
+    import subprocess
+    import time
+
+    path = os.path.expanduser(time.strftime(
+        "~/Desktop/Frame Shot %Y-%m-%d at %H.%M.%S.png"))
+    try:
+        subprocess.Popen(["screencapture", f"-R{x},{y},{w},{h}", path],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
 
 
 def _place_front_window(x: int, y: int, w: int, h: int) -> None:

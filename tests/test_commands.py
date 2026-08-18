@@ -138,7 +138,7 @@ def test_a_short_frame_hold_is_a_no_op():
 def test_ily_toggles_off_and_back_on():
     engine = CommandEngine(hand="Right")
     fired = hold_release(
-        engine, lambda t: Snapshot(right=frame("Right", t, ILY)), hold_s=1.3)
+        engine, lambda t: Snapshot(right=frame("Right", t, ILY)), hold_s=2.0)
     toggles = [e for e in fired if e.command is Command.TOGGLE]
     assert len(toggles) == 1 and toggles[0].data["enabled"] is False
     assert engine.enabled is False
@@ -150,7 +150,7 @@ def test_ily_toggles_off_and_back_on():
     assert not [e for e in fired2 if e.command is Command.NEW_PANE]
     # ...but ILY is the way back in.
     fired3 = hold_release(
-        engine, lambda t: Snapshot(right=frame("Right", t, ILY)), hold_s=1.3)
+        engine, lambda t: Snapshot(right=frame("Right", t, ILY)), hold_s=2.0)
     toggles3 = [e for e in fired3 if e.command is Command.TOGGLE]
     assert len(toggles3) == 1 and toggles3[0].data["enabled"] is True
 
