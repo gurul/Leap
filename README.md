@@ -1,8 +1,15 @@
-# leap-input
+# Leap
 
-Hand tracking → real macOS cursor input. Point to move, pinch to click, make a fist to drag — with a Leap Motion Controller, or with nothing but a webcam.
+**Hand tracking → real macOS cursor input.** Point to move, pinch to click, make a fist to drag — with a Leap Motion Controller, or with nothing but a webcam.
 
-Touchless mice are a graveyard of demos that feel magical for ten seconds and unusable for ten minutes. `leapinput` is an attempt to find out why, and to fix it with measurement instead of taste. Every threshold in here — the pinch distance, the clutch debounce, the gain curve, the finger count that lifts the cursor — was fitted from recorded hand data on real hardware, and the numbers that look arbitrary are the ones that took the longest to earn.
+Touchless mice are a graveyard of demos that feel magical for ten seconds and unusable for ten minutes. Leap is an attempt to find out why, and to fix it with measurement instead of taste. Every threshold in here — the pinch distance, the clutch debounce, the gain curve, the finger count that lifts the cursor — was fitted from recorded hand data on real hardware, and the numbers that look arbitrary are the ones that took the longest to earn.
+
+- **Two sensors, one pipeline.** A $80 Leap Motion at ~111 fps or a plain webcam at ~30 fps, feeding the identical gesture vocabulary.
+- **Verified against a corpus, not a demo.** 3,639 recorded frames of real use replay through the pipeline in CI; each pose does exactly one thing and nothing else.
+- **149 hardware-free tests in 1.5s.** All the fiddly temporal logic runs on frozen dataclasses — no device, no hands, no flakiness.
+- **Designed to fail safe.** A separate guard process releases every mouse button if the main process dies — even to `SIGKILL`.
+
+## How it works
 
 ```
 ┌─────────────┐                                  ┌──────────────┐
@@ -28,62 +35,50 @@ Touchless mice are a graveyard of demos that feel magical for ten seconds and un
                     └────────────────────────────────────────┘
 ```
 
-Each layer only knows about the one below it. `capture.py` is the only module that imports `leap`; `camera.py` is the only one that imports MediaPipe. Everything above them consumes a frozen dataclass, which is why the fiddly temporal logic is tested with **149 tests in 1.5s** and no hardware and no hands.
+Each layer only knows about the one below it. `capture.py` is the only module that imports `leap`; `camera.py` is the only one that imports MediaPipe. Everything above them consumes a frozen dataclass — which is why the temporal logic is testable without hardware.
 
 ## The vocabulary
 
-```
-point (1-3 fingers)   cursor moves
-pinch                 click / drag  (two quick pinches = real double-click)
-fist                  drag (--source leap; off by default on camera, where
-                      pinch misreads made clicking flaky — pinch already
-                      holds the button, so pinch-and-move drags. --drag
-                      re-enables the fist)
-open hand (4-5)       LIFT — cursor parked, reposition freely
-hand out of view      disengaged, everything released
-```
+### Cursor control
 
-And on the camera path, three **pose-hold commands** — hold the pose until the
-ring in the preview fills, release to fire (the shape every shipping mid-air UI
-converged on; nothing here can carry the hand out of frame the way the cut
-swipes did):
+| Pose | Action |
+|---|---|
+| point (1–3 fingers) | cursor moves |
+| pinch | click / drag (two quick pinches = real double-click) |
+| fist | drag (`--source leap`; off by default on camera¹, `--drag` re-enables) |
+| open hand (4–5 fingers) | **LIFT** — cursor parked, reposition freely |
+| hand out of view | disengaged, everything released |
 
-```
-frame a rectangle with both hands    FRAME SHOT — screenshot of the framed
-  (thumb+index L-shapes, ~0.8s)      region to the CLIPBOARD (--pane window/tab)
-OK sign (pinch, 3 fingers up, ~0.6s) Mission Control
-ILY sign (thumb+index+pinky, ~1.5s)  pause / resume all gesture control
-                                     (fires the moment the ring fills — the
-                                     chime doesn't wait for the release)
-thumbs-up (~0.6s)                    DICTATE toggle — mic ON (Tink chime);
-                                     thumbs-up again = mic OFF (Pop). Holds
-                                     the Option key in between (rebind your
-                                     dictation app — Willow Voice etc. — to a
-                                     bare Option hold). Your hand is free
-                                     while dictating: rest it, point, leave
-                                     the frame. ILY pause also closes the
-                                     mic; a 3-minute watchdog is the backstop
-```
+¹ On camera, pinch misreads made the fist flaky — and pinch already holds the button, so pinch-and-move drags.
 
-The free hand — the one the cursor doesn't follow — is a second command
-palette (raise it alone or alongside; a hand appearing away from the cursor
-hand's last position is trusted to be the free hand):
+### Pose-hold commands (camera path)
 
-```
-pinch and hold (free hand, ~0.6s)    Cmd+C  ("grab it")
-V sign        (free hand, ~0.6s)     Cmd+V  (the literal letter; thumb ignored)
-ILY sign      (free hand, ~0.6s)     Enter  (submit what you dictated)
-```
+Hold the pose until the ring in the preview fills, release to fire — the shape every shipping mid-air UI converged on, and nothing here can carry the hand out of frame the way cut-style swipes did:
 
-The dictation loop, borrowed from claude-pet: thumbs-up (Tink) and speak,
-thumbs-up again (Pop — Willow pastes), free-hand ILY to submit.
+| Pose | Hold | Action |
+|---|---|---|
+| frame a rectangle with both hands (thumb+index L-shapes) | ~0.8s | **FRAME SHOT** — screenshot of the framed region to the clipboard (`--pane window/tab`) |
+| OK sign (pinch, 3 fingers up) | ~0.6s | Mission Control |
+| ILY sign (thumb+index+pinky) | ~1.5s | pause / resume all gesture control (fires on ring-fill, with a chime) |
+| thumbs-up | ~0.6s | **DICTATE** toggle — mic ON (Tink), thumbs-up again = OFF (Pop). Holds the Option key in between; rebind your dictation app (Willow Voice etc.) to a bare Option hold. Your hand is free while dictating. ILY pause also closes the mic; a 3-minute watchdog is the backstop |
 
-While you hold the frame pose, the framed region is highlighted on the actual
-screen — Cmd+Shift+4-style — amber while the dwell fills, green when releasing
-will fire. The highlight window is excluded from screen capture, so it never
-appears in its own frame shot (`--no-screen-overlay` disables it).
+While you hold the frame pose, the framed region is highlighted on the actual screen, Cmd+Shift+4-style — amber while the dwell fills, green when releasing will fire. The highlight window is excluded from screen capture, so it never appears in its own shot (`--no-screen-overlay` disables it).
 
-Verified by replaying 3,639 recorded frames of real use. Each pose does exactly one thing and nothing else:
+### The free hand
+
+The hand the cursor doesn't follow is a second command palette — raise it alone or alongside; a hand appearing away from the cursor hand's last position is trusted to be the free hand:
+
+| Pose (free hand, ~0.6s) | Action |
+|---|---|
+| pinch and hold | Cmd+C ("grab it") |
+| V sign (thumb ignored) | Cmd+V (the literal letter) |
+| ILY sign | Enter (submit what you dictated) |
+
+The full dictation loop: thumbs-up (Tink) and speak, thumbs-up again (Pop — Willow pastes), free-hand ILY to submit.
+
+### Verified, pose by pose
+
+Replaying 3,639 recorded frames of real use — each pose does exactly one thing and nothing else:
 
 | pose | click | grab | lift | cursor moves |
 |---|---|---|---|---|
@@ -95,19 +90,9 @@ Verified by replaying 3,639 recorded frames of real use. Each pose does exactly 
 
 ## Quick start
 
-### With a Leap Motion Controller
-
-```bash
-./scripts/setup.sh                    # builds .venv, vendors the bindings, verifies
-.venv/bin/leapinput                   # dry-run: logs what it would do
-.venv/bin/leapinput --backend quartz  # drives the real cursor, 120s deadline
-```
-
-Hold your hand flat over the device, palm down. `scripts/verify-env.sh` re-asserts the whole baseline (Hyperion version, device, frame rate, Accessibility permission) and exits non-zero on drift — run it first whenever something stops working.
-
 ### With just a webcam
 
-`--source camera` runs the identical gesture vocabulary through MediaPipe HandLandmarker. No Leap hardware, no SDK, no Hyperion service:
+No Leap hardware, no SDK, no Hyperion service — `--source camera` runs the identical vocabulary through MediaPipe HandLandmarker:
 
 ```bash
 uv venv --python 3.12 .venv
@@ -116,7 +101,7 @@ curl -L --create-dirs -o vendor/hand_landmarker.task \
   "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task"
 
 .venv/bin/leapinput --source camera                     # dry-run first
-.venv/bin/leapinput --source camera --backend quartz
+.venv/bin/leapinput --source camera --backend quartz    # drives the real cursor
 ```
 
 Face the camera; the view is mirrored, so moving your hand right moves the cursor right. Add `--preview` for a live window with the hand skeleton, per-finger state and a gesture readout.
@@ -127,7 +112,7 @@ First time? Start in the practice room:
 .venv/bin/leapinput --source camera --tutorial
 ```
 
-A guided walkthrough over the live preview: point, click, drag, park, then the pose commands, one step at a time, each advancing only when the real pipeline detects the real gesture. It forces dry-run, so nothing touches your actual cursor while you learn.
+A guided walkthrough over the live preview: point, click, drag, park, then the pose commands — each step advancing only when the real pipeline detects the real gesture. It forces dry-run, so nothing touches your actual cursor while you learn.
 
 Then calibrate, because the camera thresholds ship as guesses and your hand is the ground truth:
 
@@ -135,7 +120,17 @@ Then calibrate, because the camera thresholds ship as guesses and your hand is t
 .venv/bin/python -m leapinput.calibrate capture
 ```
 
-A few prompted rounds of open/point/pinch/fist, and it fits your personal thresholds into `camera_tuning.json` (gitignored), which the camera source loads automatically.
+A few prompted rounds of open/point/pinch/fist fit your personal thresholds into `camera_tuning.json` (gitignored), which the camera source loads automatically.
+
+### With a Leap Motion Controller
+
+```bash
+./scripts/setup.sh                    # builds .venv, vendors the bindings, verifies
+.venv/bin/leapinput                   # dry-run: logs what it would do
+.venv/bin/leapinput --backend quartz  # drives the real cursor, 120s deadline
+```
+
+Hold your hand flat over the device, palm down. `scripts/verify-env.sh` re-asserts the whole baseline (Hyperion version, device, frame rate, Accessibility permission) and exits non-zero on drift — run it first whenever something stops working.
 
 ### Always-on
 
@@ -148,17 +143,9 @@ scripts/leapctl off       # clean stop: buttons released
 scripts/leapctl log       # tail the session log
 ```
 
-The ILY pose (thumb+index+pinky, held ~1.5s) pauses and resumes gesture control
-in-band — no terminal needed — and `leapctl pause` does the same from a shell
-(a chime confirms which way it went, the moment the hold completes). The
-session mirrors the pause state to `~/.leapinput/paused`, so `leapctl status`
-reports `running (paused, …)` too. `off` is for actually stopping; the
-out-of-process guard still covers every crash path, and hand-out-of-view still
-releases everything instantly.
+The ILY pose pauses and resumes gesture control in-band — no terminal needed — and `leapctl pause` does the same from a shell (a chime confirms which way it went). The session mirrors the pause state to `~/.leapinput/paused`, so `leapctl status` reports `running (paused, …)` too. The out-of-process guard still covers every crash path, and hand-out-of-view still releases everything instantly.
 
-For a one-click switch, put it in the menu bar (✋ = on, 🤟 = paused — the
-icon shows the pose that resumes it, ✊ = off; the menu toggles, pauses, and
-opens the log):
+For a one-click switch, put it in the menu bar (✋ = on, 🤟 = paused — the icon shows the pose that resumes it, ✊ = off):
 
 ```bash
 VIRTUAL_ENV=$PWD/.venv uv pip install -e '.[menubar]'
@@ -180,7 +167,7 @@ Both paths were verified end-to-end on 2026-08-12: engage → click → drag →
 
 **Lift is 4 fingers, not 2.** A deliberate pinch reads as *three* extended fingers on this hardware — 100% of 443 corpus frames. Lifting at 2 parks the cursor at the precise instant of every click. This is the single least obvious number in the system.
 
-**Gain turned out to be the tracking fix.** The control-display curve runs 2.12 px/mm at 10 mm/s up to 23.32 px/mm at 500 mm/s, and `--gain` scales both ends together so the ~11× slow-to-fast ratio survives. Raising it took frame rate from 36 → 116 fps and hand visibility from ~32% → ~100%, with no tracking parameter touched: higher gain means less hand travel, which keeps the hand in the reliable centre of the cone instead of out at the edges where LMC1 palm error goes from ~8mm to RMS >20mm. At 23 px/mm, 20mm of noise is a 460px cursor jump. Gain past 40° off-axis therefore fades to zero by 62°.
+**Gain turned out to be the tracking fix.** The control-display curve runs 2.12 px/mm at 10 mm/s up to 23.32 px/mm at 500 mm/s, and `--gain` scales both ends together so the ~11× slow-to-fast ratio survives. Raising it took frame rate from 36 → 116 fps and hand visibility from ~32% → ~100%, with no tracking parameter touched: higher gain means less hand travel, which keeps the hand in the reliable centre of the sensor's cone instead of out at the edges where LMC1 palm error goes from ~8mm to RMS >20mm. At 23 px/mm, 20mm of noise is a 460px cursor jump. Gain past 40° off-axis therefore fades to zero by 62°.
 
 **Hysteresis takes two forms.** Continuous signals (pinch distance, palm angle, grab strength) use Schmitt triggers — two thresholds with a band between them. Finger count is an *integer*, so there is no band to sit inside and the guard has to be time. The debounce is deliberately asymmetric: 0.05s to engage, 0.25s to lift. A symmetric 0.08s window produced ~28 clutch cycles in one 60-second session.
 
@@ -190,7 +177,7 @@ Full derivations, including the dead ends, are in [`docs/context/interaction.md`
 
 ## Safety, because this owns your mouse
 
-A gesture bug here does not throw a stack trace, it takes the machine you would use to fix it.
+A gesture bug here does not throw a stack trace — it takes the machine you would use to fix it.
 
 - **Dry-run is the default.** `--backend quartz` is opt-in, every time. A half-tuned Schmitt trigger wired to the real cursor will fight you for control.
 - **An out-of-process guard.** The parent holds one end of a pipe; the guard blocks on the other. Any parent exit — clean, crashed, or `SIGKILL`, which no `finally:` survives — closes the pipe and the guard posts button-up. This is the only failure class an in-process handler cannot cover.
