@@ -106,13 +106,22 @@ class QuartzBackend:
         from Quartz.CoreGraphics import (
             CGGetActiveDisplayList, CGDisplayBounds, CGMainDisplayID,
         )
-        from ApplicationServices import AXIsProcessTrusted
+        from ApplicationServices import (
+            AXIsProcessTrusted, AXIsProcessTrustedWithOptions,
+            kAXTrustedCheckOptionPrompt,
+        )
 
         if require_permission and not AXIsProcessTrusted():
+            # Ask macOS to show the grant dialog and register this process's
+            # parent app in the Accessibility list (unchecked). Still raise:
+            # the grant only takes effect on the next launch anyway, and
+            # running without it means silently dropped events.
+            AXIsProcessTrustedWithOptions({kAXTrustedCheckOptionPrompt: True})
             raise PermissionError(
                 "No Accessibility permission — synthetic events would be silently "
-                "dropped. Grant it to this process's parent application in "
-                "System Settings > Privacy & Security > Accessibility."
+                "dropped. macOS just prompted (or listed the app unchecked): "
+                "enable this process's parent application in System Settings > "
+                "Privacy & Security > Accessibility, then start again."
             )
 
         self._cg = dict(

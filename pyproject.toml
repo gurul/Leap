@@ -22,6 +22,9 @@ dev = ["pytest"]
 camera = ["mediapipe"]
 # The menu bar on/off switch (rumps 0.4.0, current per PyPI 2026-08-18).
 menubar = ["rumps"]
+# --source phone: the iPhone camera streamed from Safari over WebRTC — no app
+# install on the phone, no virtual camera driver (see leapinput/phonecam.py).
+phone = ["aiortc", "aiohttp"]
 
 [build-system]
 requires = ["setuptools>=68"]

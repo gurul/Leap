@@ -430,6 +430,67 @@ def tune_for_camera(gesture_cfg, mapping, tuning: Optional[Tuning] = None) -> No
 
 # --- the source ---------------------------------------------------------------
 
+def set_thread_qos_user_interactive() -> None:
+    """Ask the macOS scheduler for P-cores. Non-main threads default to a QoS
+    that is E-core eligible on Apple silicon, where a 9ms detect becomes 20ms+
+    whenever the machine is busy. QOS_CLASS_USER_INTERACTIVE = 0x21. No-op
+    anywhere this fails (non-macOS, sandbox).
+    """
+    try:
+        import ctypes
+        libsystem = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
+        libsystem.pthread_set_qos_class_self_np(0x21, 0)
+    except Exception:
+        pass
+
+
+def camera_names() -> list[str]:
+    """Attached camera names, in AVFoundation enumeration order.
+
+    system_profiler reports cameras in the same order AVFoundation (and so
+    cv2.VideoCapture) enumerates them, which lets us pick by name without
+    opening devices. Empty anywhere the probe fails (non-macOS, no cameras).
+    """
+    import json
+    import subprocess
+    try:
+        out = subprocess.run(
+            ["system_profiler", "SPCameraDataType", "-json"],
+            capture_output=True, text=True, timeout=10, check=True).stdout
+        return [c.get("_name", "") for c in json.loads(out)["SPCameraDataType"]]
+    except Exception:
+        return []
+
+
+def pick_camera_index() -> int:
+    """AVFoundation index of the built-in camera.
+
+    Virtual cameras (Camo, OBS, ...) register ahead of the built-in one, so
+    index 0 stops meaning "the webcam" the day one of those apps is installed —
+    opening it yields a black feed unless that app is actively streaming.
+    Falls back to 0 when no built-in camera is recognized.
+    """
+    for i, name in enumerate(camera_names()):
+        if any(k in name.lower() for k in ("macbook", "facetime", "built-in")):
+            return i
+    return 0
+
+
+def find_camera_index(name: str) -> int:
+    """Index of the first camera whose name contains `name`, case-insensitive.
+
+    This is how you deliberately target a virtual or external camera —
+    e.g. --camera-name iphone for Continuity Camera, or --camera-name camo.
+    """
+    names = camera_names()
+    for i, n in enumerate(names):
+        if name.lower() in n.lower():
+            return i
+    raise RuntimeError(
+        f"no camera matching {name!r} — attached cameras: "
+        f"{', '.join(repr(n) for n in names) or 'none found'}")
+
+
 class CameraSource:
     """Same shape as LeapSource: open(), subscribe(), latest, frames.
 
@@ -437,7 +498,8 @@ class CameraSource:
     mode. Callbacks run on that thread — keep them short, exactly as with the Leap.
     """
 
-    def __init__(self, camera: int = 0, model_path=None, mirror: bool = True,
+    def __init__(self, camera: Optional[int] = None, model_path=None,
+                 mirror: bool = True,
                  preview: bool = False, tuning: Optional[Tuning] = None,
                  hand: Optional[str] = None, two_hands: bool = False,
                  min_detection_confidence: float = 0.5,
@@ -509,18 +571,7 @@ class CameraSource:
                 f"hand landmarker model missing at {self._model_path} — fetch it "
                 f"with: curl -L -o '{self._model_path}' '{MODEL_URL}'")
 
-        cap = cv2.VideoCapture(self._camera)
-        if not cap.isOpened():
-            raise RuntimeError(
-                f"cannot open camera {self._camera} — check the terminal has "
-                "Camera permission (System Settings > Privacy & Security > Camera)")
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-        # Ask for the shallowest capture buffer the backend allows: a deep
-        # buffer serves STALE frames when detection falls behind, which reads
-        # as cursor lag no filter tuning can fix. Honored on some backends,
-        # harmless where ignored (the grab()-drain below covers those).
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        cap = self._open_capture(cv2)
 
         detect_c, presence_c, track_c = self._confidences
         landmarker = vision.HandLandmarker.create_from_options(
@@ -542,7 +593,28 @@ class CameraSource:
         self._thread.start()
         return _CameraSession(self, cap, landmarker)
 
+    def _open_capture(self, cv2):
+        """The frame producer: anything shaped like cv2.VideoCapture
+        (read/grab/release). Subclasses swap in non-device producers here —
+        phonecam.PhoneSource feeds WebRTC frames through the same loop.
+        """
+        index = self._camera if self._camera is not None else pick_camera_index()
+        cap = cv2.VideoCapture(index)
+        if not cap.isOpened():
+            raise RuntimeError(
+                f"cannot open camera {index} — check the terminal has "
+                "Camera permission (System Settings > Privacy & Security > Camera)")
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        # Ask for the shallowest capture buffer the backend allows: a deep
+        # buffer serves STALE frames when detection falls behind, which reads
+        # as cursor lag no filter tuning can fix. Honored on some backends,
+        # harmless where ignored (the grab()-drain below covers those).
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        return cap
+
     def _run(self, cv2, mp, cap, landmarker) -> None:
+        set_thread_qos_user_interactive()
         last_ms = 0
         frame_budget_us = None          # measured from the frame cadence below
         prev_capture_us = None

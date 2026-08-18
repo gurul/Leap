@@ -13,6 +13,7 @@ from . import (
     Mapping, ShortcutDriver, Snapshot, make_backend, server_status,
     tune_for_camera,
 )
+from .camera import camera_names, find_camera_index, pick_camera_index
 from .guard import Guard
 
 
@@ -68,9 +69,9 @@ def resolve_source_defaults(args) -> None:
     per source, and only for flags the user did not pass.
     """
     if args.plane is None:
-        args.plane = "xy" if args.source == "camera" else "xz"
+        args.plane = "xy" if args.source != "leap" else "xz"
     if args.point is None:
-        args.point = "knuckles" if args.source == "camera" else "index"
+        args.point = "knuckles" if args.source != "leap" else "index"
     if args.invert_x is None:
         args.invert_x = args.source == "leap"
     if args.invert_z is None:
@@ -105,11 +106,21 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="leapinput")
     ap.add_argument("--backend", choices=("dry-run", "quartz"), default="dry-run",
                     help="dry-run logs actions; quartz drives the real cursor")
-    ap.add_argument("--source", choices=("leap", "camera"), default="leap",
+    ap.add_argument("--source", choices=("leap", "camera", "phone"),
+                    default="leap",
                     help="leap: the Leap Motion controller. camera: a plain "
-                         "webcam through MediaPipe — no Leap hardware needed")
-    ap.add_argument("--camera", type=int, default=0,
-                    help="camera index for --source camera (default 0)")
+                         "webcam through MediaPipe — no Leap hardware needed. "
+                         "phone: your phone's camera streamed from its browser "
+                         "over WebRTC (open the printed URL in Safari)")
+    ap.add_argument("--camera", type=int, default=None,
+                    help="camera index for --source camera (default: auto — "
+                         "the built-in camera, skipping virtual cameras like "
+                         "Camo or OBS)")
+    ap.add_argument("--camera-name", default=None, metavar="NAME",
+                    help="pick the camera by name substring instead of index, "
+                         "e.g. 'iphone' for Continuity Camera or 'camo'")
+    ap.add_argument("--list-cameras", action="store_true",
+                    help="print attached cameras with their indexes and exit")
     ap.add_argument("--preview", action="store_true",
                     help="camera only: show the mirrored feed with the hand "
                          "skeleton, per-finger state and live gesture readout. "
@@ -180,9 +191,14 @@ def main(argv=None) -> int:
                          "runaway that owns the cursor is hard to quit by hand, so "
                          "the real backend always gets a deadline by default.")
     args = ap.parse_args(argv)
+
+    if args.list_cameras:
+        for i, name in enumerate(camera_names()):
+            print(f"{i}  {name}")
+        return 0
     if args.tutorial:
-        if args.source != "camera":
-            print("--tutorial requires --source camera", file=sys.stderr)
+        if args.source == "leap":
+            print("--tutorial requires a camera source", file=sys.stderr)
             return 2
         args.preview = True
         args.no_commands = False
@@ -196,13 +212,31 @@ def main(argv=None) -> int:
             args.drag = True
     resolve_source_defaults(args)
 
-    commands_on = args.source == "camera" and not args.no_commands
+    commands_on = args.source != "leap" and not args.no_commands
     if args.source == "camera":
+        if args.camera_name is not None:
+            try:
+                args.camera = find_camera_index(args.camera_name)
+            except RuntimeError as e:
+                print(e, file=sys.stderr)
+                return 2
+        elif args.camera is None:
+            args.camera = pick_camera_index()
+        names = camera_names()
+        label = names[args.camera] if args.camera < len(names) else "?"
         source = CameraSource(camera=args.camera, preview=args.preview,
                               hand=args.hand, two_hands=commands_on)
-        print(f"MediaPipe HandLandmarker — camera {args.camera} (mirrored)")
+        print(f"MediaPipe HandLandmarker — camera {args.camera} "
+              f"({label}, mirrored)")
+    elif args.source == "phone":
+        from .phonecam import PhoneSource
+        source = PhoneSource(preview=args.preview, hand=args.hand,
+                             two_hands=commands_on)
+        print("MediaPipe HandLandmarker — phone camera over WebRTC (mirrored)")
+        print(f"  On the phone, open:  {source.url}")
+        print("  (accept the certificate warning once, then tap Start)")
     elif args.preview:
-        print("--preview requires --source camera", file=sys.stderr)
+        print("--preview requires a camera source", file=sys.stderr)
         return 2
     else:
         status = server_status()
@@ -227,7 +261,7 @@ def main(argv=None) -> int:
     mapping = Mapping(plane=args.plane, invert_x=args.invert_x,
                       invert_z=args.invert_z, gain_scale=args.gain,
                       tracking_point=args.point)
-    if args.source == "camera":
+    if args.source != "leap":
         tune_for_camera(gesture_cfg, mapping)
     # User flags win over both the Leap defaults and the camera retune.
     if args.cutoff is not None:
@@ -365,7 +399,7 @@ def main(argv=None) -> int:
         print("\n  *** DRIVING THE REAL CURSOR ***")
         print("  Drop your hand to the desk to release it — the device stops")
         print("  tracking entirely, so that is a hard disengage, not a threshold.")
-        if args.source == "camera":
+        if args.source != "leap":
             print("  Face the camera; the view is mirrored — move right, cursor")
             print("  goes right. Hand out of view = hard release, like the Leap.")
         elif args.plane == "xy":
@@ -396,7 +430,7 @@ def main(argv=None) -> int:
                   "ILY = Enter")
         if args.duration:
             print(f"  auto-stops after {args.duration:.0f}s")
-    where = ("into the camera view" if args.source == "camera"
+    where = ("into the camera view" if args.source != "leap"
              else "above the device")
     print(f"\nRaise your {args.hand.lower()} hand {where} to engage.")
 
@@ -432,6 +466,15 @@ def main(argv=None) -> int:
         win = "leapinput camera (q closes)"
         cv2.namedWindow(win, cv2.WINDOW_AUTOSIZE)
     with source.open():
+        # The heavy object graphs (mediapipe, cv2, aiortc) are built; per-frame
+        # garbage dies by refcount, so cyclic GC only contributes surprise
+        # 10-50ms pauses mid-gesture. Freeze what exists, then make gen-0
+        # sweeps rare. (Not disabled outright: aiortc's asyncio does create
+        # reference cycles.)
+        import gc
+        gc.collect()
+        gc.freeze()
+        gc.set_threshold(50_000, 10, 10)
         try:
             warned_at = time.monotonic() + 4.0
             lag_warned_at = time.monotonic() + 4.0

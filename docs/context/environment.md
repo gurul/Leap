@@ -118,3 +118,12 @@ Gotchas that cost time, so they are pinned here:
    Camera), or `cv2.VideoCapture(0)` opens nothing.
 4. The Leap SDK is now **optional**: `leapinput.capture` imports without `leap` installed and
    raises only if `LeapSource`/`server_status` are actually used.
+5. **cv2 and PyAV each bundle ffmpeg.** With the `phone` extra installed, importing both
+   `cv2` and `av` logs an objc duplicate-class warning (`AVFAudioReceiver` in two
+   libavdevice dylibs). Harmless so far (the phonecam E2E loopback passes), but if
+   `--source phone` ever crashes mysteriously, suspect this first.
+6. **Virtual cameras steal index 0.** Installing Camo Studio (2026-08-18) put "Camo Camera"
+   ahead of the MacBook camera in AVFoundation's enumeration, so `cv2.VideoCapture(0)` opened
+   a black virtual feed and tracking silently died. `camera.pick_camera_index()` now resolves
+   the built-in camera by name via `system_profiler` when no `--camera` index is given;
+   an explicit `--camera N` still overrides.

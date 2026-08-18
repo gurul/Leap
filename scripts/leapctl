@@ -39,7 +39,10 @@ case "${1:-status}" in
     fi
     mkdir -p "$RUN_DIR"
     rm -f "$PAUSED_FILE"        # a crash can strand the flag; fresh start = unpaused
-    nohup "$BIN" --source camera --backend quartz --duration 0 "$@" \
+    # Unbuffered, so the log shows startup (which camera, tracking warnings)
+    # live instead of flushing only at exit — buffered logs made a dead
+    # session's output look like the current one's.
+    PYTHONUNBUFFERED=1 nohup "$BIN" --source camera --backend quartz --duration 0 "$@" \
       >>"$LOG_FILE" 2>&1 &
     echo $! >"$PID_FILE"
     disown

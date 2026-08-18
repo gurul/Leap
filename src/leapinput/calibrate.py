@@ -24,6 +24,7 @@ import json
 import time
 from collections import defaultdict
 from pathlib import Path
+from typing import Optional
 
 from .camera import CameraSource, Tuning
 
@@ -63,7 +64,8 @@ def _banner(cv2, bgr, phase: str, instruction: str, left: float,
                 (255, 255, 255), 1, cv2.LINE_AA)
 
 
-def capture(out_path: Path, rounds: int, hand: str, camera_index: int) -> int:
+def capture(out_path: Path, rounds: int, hand: str,
+            camera_index: Optional[int]) -> int:
     import cv2
 
     # hand= matters most HERE: calibration records fists and pinches, exactly
@@ -261,7 +263,8 @@ def main(argv=None) -> int:
     cap.add_argument("-o", "--out", type=Path, default=SESSION_PATH)
     cap.add_argument("--rounds", type=int, default=3)
     cap.add_argument("--hand", choices=("Left", "Right"), default="Right")
-    cap.add_argument("--camera", type=int, default=0)
+    cap.add_argument("--camera", type=int, default=None,
+                     help="camera index (default: auto — the built-in camera)")
     cap.add_argument("--no-analyze", action="store_true",
                      help="record only; fit later with `analyze`")
     ana = sub.add_parser("analyze", help="refit thresholds from a session file")
