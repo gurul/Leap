@@ -219,6 +219,18 @@ class Config:
     pinch_off_mm: float = 68.0
     pinch_dwell: float = 0.03
     pinch_min_strength: float = 0.50
+    # KINEMATIC gate on pinch ONSET (fingers-ladder path): a pinch may only
+    # LATCH while the hand is slow. People decelerate to near-stillness before
+    # selecting (Fitts final approach; RIDS, UIST 2022, detects selection FROM
+    # those dynamics), so a pinch-shaped read during fast travel is
+    # overwhelmingly a tracking artifact — measured 2026-08-18 on the phone
+    # source: 24 of 28 presses in one session latched mid-flight (median 550px
+    # of held travel; 1 true click). Releases are NEVER gated — a stuck button
+    # is worse than any missed click. 150 mm/s sits between deliberate aiming
+    # (<50 mm/s smoothed) and travel (200-800 mm/s; corpus roam peaks 419);
+    # tune_for_camera scales it with the reach-box zoom like every other
+    # speed. To pinch-drag, aim first — which is how a mouse works too.
+    pinch_arm_max_speed: float = 150.0
     # RELEASE ASSIST (camera path): a held pinch measures 15-18mm, but a
     # relaxed post-click hand parks INSIDE the 50-68mm hysteresis band —
     # fingers "kind of open", never reaching the off threshold — leaving the
@@ -551,6 +563,11 @@ class GestureEngine:
         """
         confident = (frame.pinch_strength >= self.cfg.pinch_min_strength
                      and (self.pinch.state or frame.extended_count > 0))
+        # Kinematic gate, onset only (see Config.pinch_arm_max_speed): the
+        # latched state is exempt so a genuine drag can move at full speed and
+        # a release is never blocked.
+        if not self.pinch.state and self._speed(frame) > self.cfg.pinch_arm_max_speed:
+            confident = False
         # Feed the Schmitt a value it will reject unless the corroborating signal
         # agrees, so hysteresis still governs the transition.
         value = frame.pinch_distance if confident else self.cfg.pinch_off_mm + 1.0
@@ -575,6 +592,14 @@ class GestureEngine:
         elif edge is False:
             self._emit(Intent.SELECT_UP, frame)
 
+    @staticmethod
+    def _speed(frame: HandFrame) -> float:
+        """Physical hand speed: motion_scale undoes the distance shrinkage of
+        a monocular source, so the kinematic pinch gate judges the hand, not
+        how far it happens to be from the camera."""
+        v = frame.palm_velocity
+        return math.sqrt(v.x * v.x + v.y * v.y + v.z * v.z) * frame.motion_scale
+
     def _settle_factor(self, frame: HandFrame) -> float:
         """1.0 = move freely, 0.0 = frozen. Ramps as a pinch closes.
 
@@ -582,8 +607,16 @@ class GestureEngine:
         is dragging and needs full gain back — a held pinch (~15mm) and a fist
         (~18mm) both sit below settle_full for their whole duration, so gating
         on the raw distance froze every drag the vocabulary promises.
+
+        Also only while the hand is SLOW: the kinematic gate means no click
+        can latch during fast travel, so a pinch-shaped read out there (a
+        relaxed hand foreshortened by the camera angle) must not freeze the
+        cursor mid-motion — that stutter reads as lag and makes the user
+        tense the hand, the exact strain this design is trying to remove.
         """
         if self.pinch.state or self.grab.state:
+            return 1.0
+        if self._speed(frame) > self.cfg.pinch_arm_max_speed:
             return 1.0
         start, full = self.cfg.settle_start_mm, self.cfg.settle_full_mm
         d = frame.pinch_distance

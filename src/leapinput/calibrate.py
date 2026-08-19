@@ -65,12 +65,9 @@ def _banner(cv2, bgr, phase: str, instruction: str, left: float,
 
 
 def capture(out_path: Path, rounds: int, hand: str,
-            camera_index: Optional[int]) -> int:
+            source: CameraSource) -> int:
     import cv2
 
-    # hand= matters most HERE: calibration records fists and pinches, exactly
-    # the poses where the handedness label flaps.
-    source = CameraSource(camera=camera_index, preview=True, hand=hand)
     state = {"label": None, "round": 0}
     rows: list[dict] = []
 
@@ -101,6 +98,18 @@ def capture(out_path: Path, rounds: int, hand: str,
 
     aborted = False
     with source.open():
+        # Wait for a tracked hand before any clock starts — the phone source
+        # connects on its own schedule (open the URL, tap Start), and a
+        # countdown racing that records an empty session.
+        while not aborted and source.latest.get(hand) is None:
+            bgr = source.preview_frame
+            if bgr is not None:
+                cv2.putText(bgr, f"show your {hand.lower()} hand to begin",
+                            (8, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
+                            (0, 200, 255), 2, cv2.LINE_AA)
+                cv2.imshow(win, bgr)
+            if cv2.waitKey(30) & 0xFF in (27, ord("q")):
+                aborted = True
         for rnd in range(1, rounds + 1):
             for label, instruction, secs in STEPS:
                 for phase, dur in (("ready", READY_SECONDS), ("record", secs)):
@@ -165,8 +174,15 @@ def _band(low_pop: list[float], high_pop: list[float], min_gap: float,
     return lo_hi + 0.35 * gap, lo_hi + 0.70 * gap, gap
 
 
-def fit(rows: list[dict]) -> tuple[Tuning, list[str]]:
-    """Rows -> fitted Tuning + a human-readable report. Pure, for tests."""
+def fit(rows: list[dict],
+        base: Optional[Tuning] = None) -> tuple[Tuning, list[str]]:
+    """Rows -> fitted Tuning + a human-readable report. Pure, for tests.
+
+    `base` carries the NON-pose fields forward (reach box, working distance,
+    hand span, anchor mode) — fitting pose thresholds must never wipe the
+    setup calibration that lives in the same file. analyze() passes the
+    stored tuning; the default keeps this function pure for tests.
+    """
     by = defaultdict(list)
     for r in rows:
         by[r["step"]].append(r)
@@ -224,7 +240,7 @@ def fit(rows: list[dict]) -> tuple[Tuning, list[str]]:
         fitted["pinch_source"] = source
         report.append(f"  pinch signal: {source} (wider gap)")
 
-    tuning = dataclasses.replace(defaults, **fitted)
+    tuning = dataclasses.replace(base or defaults, **fitted)
 
     # Sanity: reclassify the corpus with the fitted single-frame thresholds.
     mid_thumb = (tuning.thumb_on_ratio + tuning.thumb_off_ratio) / 2.0
@@ -247,7 +263,7 @@ def fit(rows: list[dict]) -> tuple[Tuning, list[str]]:
 
 def analyze(path: Path, write: bool = True) -> int:
     rows = [json.loads(line) for line in open(path)]
-    tuning, report = fit(rows)
+    tuning, report = fit(rows, base=Tuning.load())
     print("\n".join(report))
     if write:
         out = tuning.save()
@@ -263,8 +279,13 @@ def main(argv=None) -> int:
     cap.add_argument("-o", "--out", type=Path, default=SESSION_PATH)
     cap.add_argument("--rounds", type=int, default=3)
     cap.add_argument("--hand", choices=("Left", "Right"), default="Right")
+    cap.add_argument("--source", choices=("camera", "phone"), default="camera",
+                     help="phone: calibrate through the SAME camera and "
+                          "geometry the sessions use — thresholds fitted at "
+                          "one viewpoint do not survive another")
     cap.add_argument("--camera", type=int, default=None,
                      help="camera index (default: auto — the built-in camera)")
+    cap.add_argument("--camera-name", default=None, metavar="NAME")
     cap.add_argument("--no-analyze", action="store_true",
                      help="record only; fit later with `analyze`")
     ana = sub.add_parser("analyze", help="refit thresholds from a session file")
@@ -274,7 +295,13 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
 
     if args.cmd == "capture":
-        rc = capture(args.out, args.rounds, args.hand, args.camera)
+        # Reuse reach's source plumbing so `--source phone` calibrates
+        # through the exact camera and geometry the sessions run on.
+        # hand= matters most HERE: calibration records fists and pinches,
+        # exactly the poses where the handedness label flaps.
+        from .reach import _build_source
+        source = _build_source(args, Tuning.load())
+        rc = capture(args.out, args.rounds, args.hand, source)
         if rc == 0 and not args.no_analyze:
             return analyze(args.out)
         return rc

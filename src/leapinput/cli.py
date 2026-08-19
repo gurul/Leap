@@ -78,6 +78,11 @@ def resolve_source_defaults(args) -> None:
         args.invert_z = False
     if args.drag is None:
         args.drag = args.source == "leap"
+    if args.map is None:
+        # Touch is the camera-side framework: people address a screen as
+        # fixed points (updated by use 2026-08-18). The Leap keeps the
+        # measured relative ratchet — its reachable volume never fit absolute.
+        args.map = "relative" if args.source == "leap" else "touch"
 
 
 def _overlay_commands(cv2, bgr, overlay: dict) -> None:
@@ -173,6 +178,17 @@ def main(argv=None) -> int:
                          "(default 30). Raise it if the cursor will not move")
     ap.add_argument("--gain", type=float, default=1.0,
                     help="sensitivity multiplier; 2 = twice as fast, 0.5 = half")
+    ap.add_argument("--map", choices=("touch", "relative", "absolute"),
+                    default=None,
+                    help="touch (camera default): the screen is a touchscreen "
+                         "sheet under your hand — fixed points, the dynamic "
+                         "reach box follows overshoot. relative (leap "
+                         "default): the clutch ratchet, like a mouse. "
+                         "absolute: alias of touch. Fit the box first with "
+                         "`python -m leapinput.reach corners`")
+    ap.add_argument("--no-reach", action="store_true",
+                    help="camera only: ignore the stored reach box and map the "
+                         "whole frame, as before `leapinput.reach map` ran")
     ap.add_argument("--cutoff", type=float, default=None,
                     help="1 euro filter floor in Hz. Lower = smoother when "
                          "still but laggier; raise it if the cursor feels like "
@@ -212,6 +228,28 @@ def main(argv=None) -> int:
             args.drag = True
     resolve_source_defaults(args)
 
+    if args.map in ("absolute", "touch") and args.source == "leap":
+        print("--map absolute needs a camera source (it maps the reach box, "
+              "a camera concept)", file=sys.stderr)
+        return 2
+
+    tuning = None
+    if args.source != "leap":
+        import dataclasses
+        from .camera import Tuning
+        tuning = Tuning.load()
+        if args.no_reach:
+            tuning = dataclasses.replace(tuning, reach_x0=0.0, reach_y0=0.0,
+                                         reach_x1=1.0, reach_y1=1.0)
+        if tuning.reach_active:
+            zx, zy = tuning.reach_zoom
+            print(f"reach box active — zoom {zx:.1f}x/{zy:.1f}x "
+                  f"(refit: python -m leapinput.reach map | off: --no-reach)")
+        elif args.map in ("absolute", "touch"):
+            print("note: --map absolute with no reach box maps the WHOLE "
+                  "frame to the screen; fit your comfortable reach first "
+                  "with: python -m leapinput.reach map", file=sys.stderr)
+
     commands_on = args.source != "leap" and not args.no_commands
     if args.source == "camera":
         if args.camera_name is not None:
@@ -225,13 +263,14 @@ def main(argv=None) -> int:
         names = camera_names()
         label = names[args.camera] if args.camera < len(names) else "?"
         source = CameraSource(camera=args.camera, preview=args.preview,
-                              hand=args.hand, two_hands=commands_on)
+                              hand=args.hand, two_hands=commands_on,
+                              tuning=tuning)
         print(f"MediaPipe HandLandmarker — camera {args.camera} "
               f"({label}, mirrored)")
     elif args.source == "phone":
         from .phonecam import PhoneSource
         source = PhoneSource(preview=args.preview, hand=args.hand,
-                             two_hands=commands_on)
+                             two_hands=commands_on, tuning=tuning)
         print("MediaPipe HandLandmarker — phone camera over WebRTC (mirrored)")
         print(f"  On the phone, open:  {source.url}")
         print("  (accept the certificate warning once, then tap Start)")
@@ -260,9 +299,10 @@ def main(argv=None) -> int:
         gesture_cfg.clutch_off_deg_xy = args.clutch_deg + 15.0
     mapping = Mapping(plane=args.plane, invert_x=args.invert_x,
                       invert_z=args.invert_z, gain_scale=args.gain,
-                      tracking_point=args.point)
+                      tracking_point=args.point,
+                      absolute=args.map in ("absolute", "touch"))
     if args.source != "leap":
-        tune_for_camera(gesture_cfg, mapping)
+        tune_for_camera(gesture_cfg, mapping, tuning)
     # User flags win over both the Leap defaults and the camera retune.
     if args.cutoff is not None:
         mapping.pointer_min_cutoff = args.cutoff
@@ -407,6 +447,9 @@ def main(argv=None) -> int:
             print("  on it. Raise/lower to move up/down; height is the cursor axis.")
         else:
             print("  Hold your hand FLAT over the device, palm down.")
+        if mapping.absolute:
+            print("  ABSOLUTE mapping: the reach box IS the screen — point at a")
+            print("  spot to put the cursor there; no clutching needed.")
         if args.drag:
             print("  point = move   pinch = click   fist = drag   open hand = lift")
         else:

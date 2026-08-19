@@ -1,0 +1,29 @@
+# XcodeGen spec: `brew install xcodegen && cd ios/LeapDepth && xcodegen`
+# then open LeapDepth.xcodeproj, pick your personal team, run on the phone.
+name: LeapDepth
+options:
+  bundleIdPrefix: world.era
+targets:
+  LeapDepth:
+    type: application
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources: [Sources]
+    info:
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: LeapDepth
+        NSCameraUsageDescription: >-
+          Streams synchronized RGB and depth frames to Leap on your Mac for
+          hand tracking. Nothing leaves your local network.
+        NSMotionUsageDescription: >-
+          Detects the phone stand being bumped so Leap can warn about stale
+          calibration.
+        NSLocalNetworkUsageDescription: >-
+          Connects to Leap running on your Mac over your local network.
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+    settings:
+      base:
+        TARGETED_DEVICE_FAMILY: "1"
+        SWIFT_VERSION: "5.9"

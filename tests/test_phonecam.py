@@ -130,3 +130,38 @@ def test_video_jitter_capacity_bounded_to_64():
 def test_page_prefers_framerate_and_hints_motion():
     assert "contentHint = 'motion'" in PAGE
     assert "maintain-framerate" in PAGE
+
+
+# --- IMU: the stand-bump detector ---------------------------------------------
+
+def _bare_server():
+    """A server instance without network/token side effects — _on_imu is
+    pure state-machine over its own attributes."""
+    from leapinput.phonecam import _PhoneCamServer
+    s = _PhoneCamServer.__new__(_PhoneCamServer)
+    s.imu_gravity = None
+    s.stand_moved_at = 0.0
+    s._imu_warned_at = 0.0
+    return s
+
+
+def test_steady_gravity_never_reads_as_a_bump():
+    s = _bare_server()
+    for _ in range(50):                       # phone at rest on the stand
+        s._on_imu({"x": 0.1, "y": 9.7, "z": 1.2})
+    assert s.stand_moved_at == 0.0
+    assert s.imu_gravity is not None
+    assert abs(s.imu_gravity[1] - 9.7) < 0.01
+
+
+def test_a_stand_bump_is_detected_and_slow_tilt_is_not():
+    s = _bare_server()
+    for _ in range(20):
+        s._on_imu({"x": 0.1, "y": 9.7, "z": 1.2})
+    # Slow drift (thermal creep, tiny slippage): tracked into gravity, no bump.
+    for i in range(40):
+        s._on_imu({"x": 0.1 + i * 0.01, "y": 9.7, "z": 1.2})
+    assert s.stand_moved_at == 0.0
+    # A real knock: several m/s^2 away from the gravity estimate.
+    s._on_imu({"x": 5.0, "y": 6.0, "z": 1.2})
+    assert s.stand_moved_at > 0.0

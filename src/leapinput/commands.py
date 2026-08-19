@@ -224,6 +224,11 @@ class CommandEngine:
     reused as a pause switch).
     """
 
+    # How long a button posture suppresses cursor-hand command arming, sized
+    # to outlast the hand-opening transition (~0.1-0.3s at 30fps) without
+    # noticeably delaying a deliberate pose formed from a fist.
+    BUTTON_POSE_SHADOW_S = 0.4
+
     def __init__(self, hand: str = "Right", pinch_on_mm: float = 50.0,
                  clock: Callable[[], float] = time.monotonic):
         self.hand = hand
@@ -254,6 +259,13 @@ class CommandEngine:
         self._dictating = False
         self._rect: Optional[tuple] = None      # last rect while framing
         self._now = 0.0
+        # When the cursor hand was last in a BUTTON posture. Cursor-hand
+        # command poses inside the shadow are transitions, not commands — see
+        # on_snapshot. Tracked separately per posture because each suppresses
+        # a different command: a click-pinch opens INTO the OK shape (mission),
+        # a fist opens thumb-first INTO the thumbs-up (dictate).
+        self._pinch_shadow_until = float("-inf")
+        self._fist_shadow_until = float("-inf")
         self._subscribers: list[Callable[[CommandEvent], None]] = []
 
     def subscribe(self, fn: Callable[[CommandEvent], None]) -> None:
@@ -266,11 +278,20 @@ class CommandEngine:
 
     @property
     def busy(self) -> bool:
-        """A command hold is armed: the cursor engine should stand down so the
-        pose that forms the command cannot also steer the pointer."""
-        return (self.pane.armed or self.mission.armed or self.toggle.armed
-                or self.dictate.armed or self.copy.armed or self.paste.armed
-                or self.enter.armed)
+        """A command hold is PAST ITS ARM TIME: the cursor engine should stand
+        down so the pose that forms the command cannot also steer the pointer.
+
+        Gated on progress, not on `armed` — armed is true from the very first
+        pattern-matching frame, and the CLI answers `busy` by feeding the
+        cursor engine an EMPTY snapshot, which force-releases held buttons and
+        the clutch. Measured in live use: transitional frames (a pinch opening
+        into a palm) pattern-match command poses for a frame or two, and each
+        one blanked the cursor mid-gesture. The arm dwell exists precisely to
+        absorb those frames; busy must wait for it too.
+        """
+        return any(h.progress(self._now) > 0.0
+                   for h in (self.pane, self.mission, self.toggle,
+                             self.dictate, self.copy, self.paste, self.enter))
 
     @property
     def overlay(self) -> dict:
@@ -302,6 +323,27 @@ class CommandEngine:
         self._last_wall = wall
         now = self._now
         mine = snap.get(self.hand)
+
+        # The cursor hand's button postures leak into command poses on their
+        # way OPEN: releasing a click-pinch extends middle/ring/pinky while
+        # thumb and index are still close — the exact OK shape — and a fist
+        # opens thumb-first through a perfect thumbs-up. Those frames are
+        # transitions, not commands, and in live use they armed mission
+        # control every time a pinch was released into an open palm. A button
+        # posture casts a short shadow in which the matching cursor-hand hold
+        # refuses to arm. A DELIBERATE OK never casts one (its back fingers
+        # are extended), so it arms instantly from rest; a thumbs-up formed
+        # without passing through a full fist arms instantly too.
+        if mine is not None:
+            if mine.extended_count == 0:
+                self._fist_shadow_until = now + self.BUTTON_POSE_SHADOW_S
+            if (mine.pinch_distance <= self.pinch_on_mm
+                    and not (mine.extended[2] and mine.extended[3]
+                             and mine.extended[4])):
+                self._pinch_shadow_until = now + self.BUTTON_POSE_SHADOW_S
+        pinch_shadow = now < max(self._pinch_shadow_until,
+                                 self._fist_shadow_until)
+        fist_shadow = now < self._fist_shadow_until
 
         # TOGGLE listens even while disabled — it is the way back in.
         ily = mine is not None and is_ily_pose(mine)
@@ -335,8 +377,9 @@ class CommandEngine:
         if not framing and not self.pane.armed:
             self._rect = None
 
-        # MISSION: the OK pose, one hand, never while framing.
-        ok = (not framing and mine is not None
+        # MISSION: the OK pose, one hand, never while framing or in the
+        # shadow of a click-pinch it could be opening out of.
+        ok = (not framing and not pinch_shadow and mine is not None
               and is_ok_pose(mine, self.pinch_on_mm))
         if self.mission.update(ok, now):
             self._emit(Command.MISSION_CONTROL)
@@ -346,7 +389,8 @@ class CommandEngine:
         # — rest it, point, leave the frame — nothing here closes the mic
         # except another thumbs-up, the ILY pause, or the driver's watchdog.
         # The driver holds the dictation hotkey while _dictating is true.
-        thumb = not framing and mine is not None and is_thumbs_up(mine)
+        thumb = (not framing and not fist_shadow and mine is not None
+                 and is_thumbs_up(mine))
         if self.dictate.update(thumb, now):
             self._dictating = not self._dictating
             self._emit(Command.DICTATE, active=self._dictating)

@@ -13,6 +13,22 @@ import time
 from typing import Protocol
 
 
+def main_screen_size() -> tuple[float, float]:
+    """Logical pixels of the main display, straight from Quartz.
+
+    The camera layer shapes its dynamic reach box to the REAL screen it maps
+    onto (this machine: 1512x982, the 14.2-inch MacBook Pro panel), so the
+    box has the display's actual aspect, not a 16:10 guess. Falls back to
+    that same panel's dimensions where Quartz is unavailable (tests, CI).
+    """
+    try:
+        from Quartz.CoreGraphics import CGDisplayBounds, CGMainDisplayID
+        b = CGDisplayBounds(CGMainDisplayID())
+        return (float(b.size.width), float(b.size.height))
+    except Exception:
+        return (1512.0, 982.0)
+
+
 class Backend(Protocol):
     def move(self, x: float, y: float) -> None: ...
     @property

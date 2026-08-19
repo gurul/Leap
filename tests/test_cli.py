@@ -12,7 +12,7 @@ from leapinput.cli import resolve_source_defaults
 
 def parse(source: str, *extra: str) -> argparse.Namespace:
     ns = argparse.Namespace(source=source, plane=None, point=None,
-                            invert_x=None, invert_z=None, drag=None)
+                            invert_x=None, invert_z=None, drag=None, map=None)
     for flag in extra:
         key, _, val = flag.partition("=")
         setattr(ns, key, val == "True")
@@ -42,3 +42,12 @@ def test_explicit_flags_override_both_directions():
     assert parse("leap", "invert_x=False").invert_x is False
     assert parse("camera", "invert_x=True").invert_x is True
     assert parse("leap", "invert_z=True").invert_z is True
+
+
+def test_map_defaults_touch_for_cameras_relative_for_leap():
+    """Touchscreen is the camera-side interaction framework (2026-08-18):
+    people address a screen as fixed points; the dynamic box supplies the
+    "dynamic". The Leap keeps the measured relative ratchet."""
+    assert parse("leap").map == "relative"
+    assert parse("camera").map == "touch"
+    assert parse("phone").map == "touch"

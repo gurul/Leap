@@ -89,6 +89,10 @@ NOMINAL_SPAN_MM = 55.0
 
 TUNING_PATH = Path(__file__).resolve().parents[2] / "camera_tuning.json"
 
+# Extra control-display gain for camera sources, multiplied onto BOTH ends of
+# the Leap-fitted curve by tune_for_camera (rationale at the call site).
+CAMERA_GAIN_BOOST = 2.0
+
 
 @dataclass(frozen=True)
 class Tuning:
@@ -124,6 +128,68 @@ class Tuning:
     # YOUR data; measured 2026-08-12 the 3D clouds overlapped by 18mm while the
     # 2D signal is immune to the occlusion-inflated depth guess.
     pinch_source: str = "world"
+    # Reach box: the sub-rectangle of the (mirrored) camera frame that maps to
+    # the FULL virtual plane, in normalized image coords. For a camera fixed in
+    # place — a phone on a stand — the comfortable reach covers only part of
+    # the frame; mapping the whole frame wastes the rest on stretching. Fitted
+    # by `python -m leapinput.reach corners` (or `map`); the identity defaults
+    # keep the old whole-frame behaviour. In palm mode (the default) the box
+    # FOLLOWS an overshooting hand — see CameraSource._resolve_reach — so
+    # positions still clamp to the box, but the box itself honours natural
+    # cadence instead of being a wall.
+    reach_x0: float = 0.0
+    reach_y0: float = 0.0
+    reach_x1: float = 1.0
+    reach_y1: float = 1.0
+    # Where (and what) the reach box IS. "palm" (default): a DYNAMIC box —
+    # screen-proportioned (16:10, the shape it maps to), sized so its
+    # PHYSICAL dimensions match the calibration (width scales with apparent
+    # hand span, the free distance signal), and centred on the palm each time
+    # the hand (re)appears. The box comes to the hand: no fixed spot to
+    # return to, no way to start out of bounds, same physical box at any
+    # distance. It stays pinned while the hand remains tracked, so mapping is
+    # stable within an engagement. "fixed": the exact rectangle reach
+    # corners/map placed, where it placed it.
+    reach_center: str = "palm"
+    # Your hand as the calibration target — the ChArUco-board idea, with the
+    # hand as the board: a rigid object of known physical size present in
+    # every frame, converting image measurements to metric. This is the REAL
+    # index-MCP-to-pinky-MCP knuckle span in mm, set by `python -m
+    # leapinput.reach hand` (a ruler across the back of the hand beats the
+    # model estimate). 0 = fall back to the nominal adult span. Used for
+    # metric reporting (physical box size, touch scale); deliberately NOT
+    # used to renormalize pose pseudo-mm — the calibrated pinch thresholds
+    # live in that space and would silently shift.
+    hand_span_mm: float = 0.0
+
+    @property
+    def span_mm_effective(self) -> float:
+        return self.hand_span_mm or NOMINAL_SPAN_MM
+
+    # Apparent knuckle span (normalized image units) at the calibrated working
+    # distance — captured by leapinput.reach alongside the box. Nonzero, it
+    # turns on distance-invariant sensitivity: motion is scaled by
+    # ref_span_img / current span, so backing away from the camera no longer
+    # demands exaggerated gestures. 0.0 = off (pre-calibration behaviour).
+    ref_span_img: float = 0.0
+
+    @property
+    def reach(self) -> tuple[float, float, float, float]:
+        """(x0, y0, x1, y1), degenerate boxes ignored rather than divided by."""
+        if self.reach_x1 - self.reach_x0 < 0.05 or \
+                self.reach_y1 - self.reach_y0 < 0.05:
+            return (0.0, 0.0, 1.0, 1.0)
+        return (self.reach_x0, self.reach_y0, self.reach_x1, self.reach_y1)
+
+    @property
+    def reach_zoom(self) -> tuple[float, float]:
+        """How much the reach box magnifies motion per axis (1.0 = whole frame)."""
+        x0, y0, x1, y1 = self.reach
+        return (1.0 / (x1 - x0), 1.0 / (y1 - y0))
+
+    @property
+    def reach_active(self) -> bool:
+        return self.reach != (0.0, 0.0, 1.0, 1.0)
 
     @classmethod
     def load(cls, path=None) -> "Tuning":
@@ -320,6 +386,26 @@ def ily_shaped(sig: PoseSignals, tuning: Tuning) -> bool:
     return thumb and index and pinky and not middle and not ring
 
 
+def v_shaped(sig: PoseSignals, tuning: Tuning) -> bool:
+    """Prev-less V-sign read (index + middle out, ring + pinky curled, thumb
+    ignored) for ROUTING, same job as ily_shaped.
+
+    The V sign is paste — and it only exists on the FREE hand (commands.py
+    bans it on the cursor hand, where it is nearly the pointing posture). So
+    a lone V-shaped detection adopted by the identity/continuity assumption
+    is guaranteed wrong-or-inert: as the cursor hand it does nothing, while
+    the intended Cmd+V never fires. Seen in live use: raise the left hand in
+    a V where the cursor hand just was, and paste silently does not work.
+    Like ILY, the pose is extended and distinctive — the label flaps on
+    curled, self-occluded poses, not on this one — so the classifier is
+    trusted. A pointing hand passing through index+middle on its way open can
+    transiently match; that costs at most a couple of held-frame dropouts on
+    the cursor, never a paste (the free-hand hold must arm and dwell)."""
+    index, middle, ring, pinky = (b < tuning.extended_max_deg
+                                  for b in sig.bends)
+    return index and middle and not ring and not pinky
+
+
 def _grab_strength(sig: PoseSignals) -> float:
     """Mean finger curl, 0 open .. 1 fist. Same shape as the Leap's signal."""
     total = sum(max(0.0, min(1.0, (bend - GRAB_BEND_LO_DEG)
@@ -345,17 +431,38 @@ def _palm_normal(world, side: str) -> Vec3:
     return Vec3(nx / mag, ny / mag, nz / mag)
 
 
-def _to_plane(lm) -> Vec3:
-    """Normalized image landmark -> virtual mm in Leap axes. Z is always 0."""
-    return Vec3((lm.x - 0.5) * PLANE_X_MM,
-                PLANE_Y_BASE + (1.0 - lm.y) * PLANE_Y_MM,
+FULL_REACH = (0.0, 0.0, 1.0, 1.0)
+
+
+def _to_plane(lm, reach: tuple[float, float, float, float] = FULL_REACH) -> Vec3:
+    """Normalized image landmark -> virtual mm in Leap axes. Z is always 0.
+
+    `reach` is the sub-rectangle of the frame that spans the whole plane
+    (Tuning.reach); positions outside it clamp to the plane edge, so the
+    pointer pins there instead of the hand chasing it out of the frame.
+    """
+    x0, y0, x1, y1 = reach
+    nx = min(1.0, max(0.0, (lm.x - x0) / (x1 - x0)))
+    ny = min(1.0, max(0.0, (lm.y - y0) / (y1 - y0)))
+    return Vec3((nx - 0.5) * PLANE_X_MM,
+                PLANE_Y_BASE + (1.0 - ny) * PLANE_Y_MM,
                 0.0)
+
+
+def plane_norm(p) -> tuple[float, float]:
+    """Inverse of _to_plane's scaling: virtual plane mm -> normalized [0,1]
+    coords, y DOWN like screen space. With a reach box active these are
+    reach-box coords, which is exactly what screen mapping wants."""
+    return (min(1.0, max(0.0, p.x / PLANE_X_MM + 0.5)),
+            min(1.0, max(0.0, 1.0 - (p.y - PLANE_Y_BASE) / PLANE_Y_MM)))
 
 
 def handframe_of(image_lms, world_lms, side: str, frame_id: int,
                  timestamp_us: int, prev: Optional[HandFrame] = None,
                  tuning: Optional[Tuning] = None,
-                 signals: Optional[PoseSignals] = None) -> HandFrame:
+                 signals: Optional[PoseSignals] = None,
+                 reach: Optional[tuple[float, float, float, float]] = None
+                 ) -> HandFrame:
     """One detected hand -> HandFrame.
 
     Cursor-driving positions (palm, index tip, knuckles) come from the IMAGE
@@ -363,8 +470,13 @@ def handframe_of(image_lms, world_lms, side: str, frame_id: int,
     curl, normal) come from the WORLD landmarks — metric, hand-centred, and
     independent of how far the hand is from the camera.
     """
-    knuckles = tuple(_to_plane(image_lms[i]) for i in MCPS)
-    wrist = _to_plane(image_lms[WRIST])
+    tuning = tuning or Tuning()
+    # `reach` override: CameraSource passes the FLOATING box (re-centred on
+    # the palm) when Tuning.reach_center == "palm"; bare calls fall back to
+    # the stored box.
+    reach = reach if reach is not None else tuning.reach
+    knuckles = tuple(_to_plane(image_lms[i], reach) for i in MCPS)
+    wrist = _to_plane(image_lms[WRIST], reach)
     n = len(knuckles) + 1
     palm = Vec3((wrist.x + sum(k.x for k in knuckles)) / n,
                 (wrist.y + sum(k.y for k in knuckles)) / n, 0.0)
@@ -378,7 +490,6 @@ def handframe_of(image_lms, world_lms, side: str, frame_id: int,
                         0.5 * (palm.y - prev.palm.y) / dt + 0.5 * prev.palm_velocity.y,
                         0.0)
 
-    tuning = tuning or Tuning()
     sig = signals or pose_signals(world_lms, image_lms)
     pinch_mm = (sig.pinch_img_mm
                 if tuning.pinch_source == "image" and sig.pinch_img_mm is not None
@@ -388,6 +499,23 @@ def handframe_of(image_lms, world_lms, side: str, frame_id: int,
         pinch_mm = POSE_BLEND * pinch_mm + (1.0 - POSE_BLEND) * prev.pinch_distance
         grab = POSE_BLEND * grab + (1.0 - POSE_BLEND) * prev.grab_strength
     strength = max(0.0, min(1.0, (STRENGTH_OPEN_MM - pinch_mm) / STRENGTH_SPAN_MM))
+
+    # Distance-invariant motion: apparent span ~ 1/distance, so ref/current
+    # says how much smaller this frame's image motion is per physical cm than
+    # at the calibrated distance. Clamped — past 3x the hand is so small that
+    # landmark noise, similarly magnified, rivals intent — and EMA-blended,
+    # because per-frame span jitter would otherwise modulate the gain audibly.
+    motion_scale = 1.0
+    if (tuning.ref_span_img > 0.0 and sig.span_img
+            and not (tuning.reach_active and tuning.reach_center == "palm")):
+        # Fixed-box mode only: the dynamic palm box already sizes itself from
+        # the span at each (re)appearance, so scaling deltas as well would
+        # compensate distance twice. Re-engaging (which the clutch does
+        # constantly) re-anchors the dynamic box to the current distance.
+        motion_scale = max(0.5, min(3.0, tuning.ref_span_img / sig.span_img))
+        if prev is not None:
+            motion_scale = (POSE_BLEND * motion_scale
+                            + (1.0 - POSE_BLEND) * prev.motion_scale)
 
     return HandFrame(
         frame_id=frame_id,
@@ -401,8 +529,9 @@ def handframe_of(image_lms, world_lms, side: str, frame_id: int,
         pinch_distance=pinch_mm,
         grab_strength=grab,
         extended=_extended(sig, prev.extended if prev else None, tuning),
-        index_tip=_to_plane(image_lms[INDEX_TIP]),
+        index_tip=_to_plane(image_lms[INDEX_TIP], reach),
         knuckles=knuckles,
+        motion_scale=motion_scale,
     )
 
 
@@ -446,6 +575,46 @@ def tune_for_camera(gesture_cfg, mapping, tuning: Optional[Tuning] = None) -> No
     # per-frame delta the Leap's 0.12mm deadzone happily amplifies into cursor
     # shiver. Swallow it: intent at these gains is never sub-half-millimetre.
     mapping.deadzone_mm = 0.6
+    # A reach box multiplies virtual mm per physical centimetre by its zoom, so
+    # everything denominated in virtual mm scales with it: the same pixel noise
+    # is now zoom x bigger in mm (deadzone), and the same physical hand speed
+    # reads zoom x faster (the gain curve's knees). Scaling both keeps the
+    # deadzone and the slow/fast gain profile anchored to the PHYSICAL hand,
+    # which leaves exactly one intended effect: zoom x more cursor per reach.
+    zx, zy = tuning.reach_zoom
+    zoom = math.sqrt(zx * zy)
+    # NOTE: this is the STORED box's zoom; the dynamic palm box re-sizes with
+    # apparent hand span per engagement (down to a 1/6-frame floor), so these
+    # compensations are anchored to the calibrated working distance and drift
+    # up to ~1.8x for a user sitting far from it. Accepted for now; the
+    # per-engagement fix is to expose the live zoom on HandFrame like
+    # motion_scale.
+    if zoom > 1.0:
+        mapping.deadzone_mm *= zoom
+        mapping.speed_lo *= zoom
+        mapping.speed_hi *= zoom
+        gesture_cfg.pinch_arm_max_speed *= zoom
+    # Camera DPI boost — ZOOM-AWARE, revised by audited measurement
+    # 2026-08-18: the reach-box zoom already multiplies px per PHYSICAL mm on
+    # both gain ends, so at zoom 3.3 the unconditional 2x boost stacked to
+    # ~14 px/physical-mm at REST — landmark noise painted as 8-12px cursor
+    # hops, unusable. The boost only tops up whatever the zoom has not
+    # already delivered (boxless cameras keep the full 2x); at a fitted box
+    # the zoom IS the DPI, a flick still crosses 1512px in ~19.5mm of hand
+    # travel, and the ~11x slow/fast ratio the Mapping docstring defends
+    # survives intact.
+    boost = max(1.0, CAMERA_GAIN_BOOST / zoom)
+    mapping.gain_min *= boost
+    mapping.gain_max *= boost
+    # The 1 euro filter's adaptive term must see PHYSICAL speed: the box zoom
+    # multiplies coordinate derivatives, so an unscaled beta opens the cutoff
+    # from 1.5Hz to ~3Hz on rest noise alone (audited: noise-driven |edx| is
+    # ~45 virtual mm/s at zoom 3.3) and the filter defeats itself exactly
+    # when it is needed most. OneEuroPlane shares one beta across both axes,
+    # so a lopsided box (reach.py warns past 1.8x) gets the geometric-mean
+    # compromise — same as every other zoom-scaled knob here.
+    if zoom > 1.0:
+        mapping.pointer_beta /= zoom
 
 
 # --- the source ---------------------------------------------------------------
@@ -524,7 +693,13 @@ class CameraSource:
                  hand: Optional[str] = None, two_hands: bool = False,
                  min_detection_confidence: float = 0.5,
                  min_presence_confidence: float = 0.5,
-                 min_tracking_confidence: float = 0.5):
+                 min_tracking_confidence: float = 0.5,
+                 screen_aspect: Optional[float] = None):
+        if screen_aspect is None:
+            from .actions import main_screen_size
+            sw, sh = main_screen_size()
+            screen_aspect = sw / sh
+        self._screen_aspect = screen_aspect
         self._camera = camera
         self._model_path = Path(model_path) if model_path else DEFAULT_MODEL
         self._mirror = mirror
@@ -562,6 +737,10 @@ class CameraSource:
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._prev: dict[str, Optional[HandFrame]] = {"Left": None, "Right": None}
+        # The floating reach box per side (reach_center == "palm"): computed
+        # when the hand (re)appears, held while it stays tracked, dropped with
+        # the hand. Written by the capture thread; read by preview/test views.
+        self._reach_now: dict[str, Optional[tuple]] = {"Left": None, "Right": None}
         self._frame_id = 0
         # Pipeline health, written by the capture thread: measured camera fps,
         # EMA of detection time, and whether detection kept up with the camera
@@ -571,6 +750,75 @@ class CameraSource:
 
     def subscribe(self, fn: Callable[[Snapshot], None]) -> None:
         self._subscribers.append(fn)
+
+    def reach_box(self, side: str) -> tuple[float, float, float, float]:
+        """The box currently mapping this side's hand — the floating one in
+        palm mode, else the stored box. What overlays should draw."""
+        if self._tuning.reach_center == "palm":
+            return self._reach_now.get(side) or self._tuning.reach
+        return self._tuning.reach
+
+    # Camera frames are captured at 4:3 (both paths run 640x480), so the
+    # frame's normalized units are anisotropic by this factor.
+    FRAME_ASPECT = 4.0 / 3.0
+
+    @property
+    def dyn_h_per_w(self) -> float:
+        """Dynamic-box height per unit width: the box is shaped like the REAL
+        display it maps onto (this machine: 1512x982, the 14.2-inch MacBook
+        Pro panel, ~1.54:1 — measurably squarer than the 16:10 guess it
+        replaces, which also shaves the audited y-axis noise excess)."""
+        return self.FRAME_ASPECT / self._screen_aspect
+
+    def _resolve_reach(self, side: str, img_lms,
+                       sig: Optional[PoseSignals] = None
+                       ) -> tuple[float, float, float, float]:
+        """Palm mode: the box is a TOUCHSCREEN SHEET under the hand.
+
+        On (re)appearance: built fresh — calibrated physical width (scaled by
+        current/reference hand span, so distance cannot shrink it),
+        screen-proportioned, centred on the knuckles, shifted to fit the
+        frame. While tracked: it stays put inside, but when the hand crosses
+        an edge the box FOLLOWS — minimal translation that keeps the hand on
+        the edge. Overshooting is natural human cadence, not an error: the
+        cursor rides the screen edge while the sheet slides, and the instant
+        the hand reverses it responds, with no overshoot debt to pay back and
+        no dead wall. (The old clamp-only behaviour pinned the cursor AND
+        made re-entry lag by the overshoot distance.)
+        """
+        t = self._tuning
+        if not t.reach_active or t.reach_center != "palm":
+            return t.reach
+        # Knuckle centroid, matching the cursor's default tracked point, so
+        # the mapped cursor sits exactly on the screen edge while dragging.
+        cx = sum(img_lms[i].x for i in MCPS) / len(MCPS)
+        cy = sum(img_lms[i].y for i in MCPS) / len(MCPS)
+        box = self._reach_now.get(side)
+        if self._prev.get(side) is None or box is None:
+            x0, y0, x1, y1 = t.reach
+            w = x1 - x0
+            if (sig is not None and sig.span_img and t.ref_span_img > 0.0):
+                w *= max(0.5, min(3.0, sig.span_img / t.ref_span_img))
+            # Floor at ~6x zoom, looser than the stored-box 4x cap: a distant
+            # hand NEEDS the shrink to keep its physical sensitivity, and the
+            # precision cost out there is the honest price of sitting far
+            # from the camera, not a reason to silently slow the cursor.
+            w = max(1.0 / 6.0, min(1.0, w))
+            h = min(1.0, w * self.dyn_h_per_w)
+            nx0 = min(max(cx - w / 2.0, 0.0), 1.0 - w)
+            ny0 = min(max(cy - h / 2.0, 0.0), 1.0 - h)
+            box = (nx0, ny0, nx0 + w, ny0 + h)
+        else:
+            x0, y0, x1, y1 = box
+            dx = (cx - x1) if cx > x1 else (cx - x0) if cx < x0 else 0.0
+            dy = (cy - y1) if cy > y1 else (cy - y0) if cy < y0 else 0.0
+            if dx or dy:
+                w, h = x1 - x0, y1 - y0
+                nx0 = min(max(x0 + dx, 0.0), 1.0 - w)
+                ny0 = min(max(y0 + dy, 0.0), 1.0 - h)
+                box = (nx0, ny0, nx0 + w, ny0 + h)
+        self._reach_now[side] = box
+        return box
 
     def _dispatch(self, snap: Snapshot) -> None:
         with self._lock:
@@ -693,11 +941,15 @@ class CameraSource:
                 if n == 1 and self._hand is not None and self._two_hands:
                     label_side = resolve_side(
                         handedness[0].category_name, 2, None)
-                    if ily_shaped(sig, self._tuning):
-                        # ILY: the label decides Enter (free hand) vs pause
-                        # (cursor hand), and the classifier is reliable on
-                        # this maximally-extended pose — the flap-defense
-                        # below stands down so left-hand ILY is always Enter.
+                    if (ily_shaped(sig, self._tuning)
+                            or v_shaped(sig, self._tuning)):
+                        # ILY and V: the label decides the command's meaning
+                        # (free-hand ILY is Enter, cursor-hand ILY is pause;
+                        # V is paste and free-hand ONLY), and the classifier
+                        # is reliable on these extended poses — the
+                        # flap-defense below stands down so a lone left-hand
+                        # ILY is always Enter and a lone left-hand V always
+                        # reaches paste.
                         side = label_side
                     else:
                         # Free-hand poses exist: a lone detection may genuinely
@@ -713,7 +965,9 @@ class CameraSource:
                     continue        # beyond working distance: not our hand
                 frame = handframe_of(img_lms, wld_lms, side, self._frame_id,
                                      now_us, prev=self._prev.get(side),
-                                     tuning=self._tuning, signals=sig)
+                                     tuning=self._tuning, signals=sig,
+                                     reach=self._resolve_reach(side, img_lms,
+                                                               sig))
                 self._prev[side] = frame
                 self._last_wrist[side] = (img_lms[0].x, img_lms[0].y, now_us)
                 self.latest_signals[side] = sig
@@ -740,6 +994,8 @@ class CameraSource:
                     else:
                         self._prev[side] = None
                         self.latest_signals[side] = None
+                        # Hand genuinely gone: the next appearance re-centres.
+                        self._reach_now[side] = None
             if self._preview:
                 self._annotate(cv2, bgr, result, snap)
                 self.preview_frame = bgr
@@ -748,6 +1004,22 @@ class CameraSource:
     def _annotate(self, cv2, bgr, result, snap: Snapshot) -> None:
         """Skeleton + per-hand signal readout, drawn on the mirrored frame."""
         h, w = bgr.shape[:2]
+        if self._tuning.reach_active:
+            # The reach box IS the screen now: show where its edges are, and
+            # flash them red while the hand is pinned outside — the moment the
+            # user would otherwise read as "the cursor stopped working".
+            # In palm mode this is the FLOATING box, drawn where it currently
+            # sits around the hand.
+            x0, y0, x1, y1 = self.reach_box(self._hand or "Right")
+            outside = False
+            for img_lms in result.hand_landmarks:
+                cx = sum(img_lms[i].x for i in MCPS) / len(MCPS)
+                cy = sum(img_lms[i].y for i in MCPS) / len(MCPS)
+                if not (x0 <= cx <= x1 and y0 <= cy <= y1):
+                    outside = True
+            color = (0, 0, 230) if outside else (0, 200, 0)
+            cv2.rectangle(bgr, (int(x0 * w), int(y0 * h)),
+                          (int(x1 * w), int(y1 * h)), color, 2)
         for img_lms in result.hand_landmarks:
             pts = [(int(lm.x * w), int(lm.y * h)) for lm in img_lms]
             for a, b in HAND_CONNECTIONS:

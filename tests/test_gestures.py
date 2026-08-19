@@ -612,3 +612,65 @@ def test_a_noise_spike_inside_the_band_does_not_release():
                          + [16.0] * 30)
     assert Intent.SELECT_DOWN in seen
     assert Intent.SELECT_UP not in seen
+
+
+# --- kinematic pinch gate (2026-08-18) ---------------------------------------
+# Measured on the phone source: 24 of 28 presses in one live session latched
+# MID-FLIGHT (median 550px of held travel; 1 true click). People decelerate to
+# near-stillness before selecting (RIDS, UIST 2022), so a pinch-shaped read at
+# speed is a tracking artifact, not a click.
+
+PINCH_POSE = dict(pinch_distance=20.0, pinch_strength=0.9,
+                  extended=(False, True, False, False, False))
+
+
+def test_a_pinch_cannot_latch_mid_flight():
+    engine = GestureEngine(cfg_fingers())
+    seen = []
+    engine.subscribe(lambda e: seen.append(e.intent))
+    t = 0
+    for _ in range(30):                     # pinch-shaped, but travelling fast
+        t += 9000
+        engine.on_snapshot(Snapshot(right=frame(
+            timestamp=t, palm_velocity=Vec3(400.0, 0.0, 0.0), **PINCH_POSE)))
+    assert Intent.SELECT_DOWN not in seen
+    for _ in range(10):                     # the hand stops: same pinch latches
+        t += 9000
+        engine.on_snapshot(Snapshot(right=frame(timestamp=t, **PINCH_POSE)))
+    assert Intent.SELECT_DOWN in seen
+
+
+def test_a_latched_pinch_drags_and_releases_at_full_speed():
+    """The gate is onset-only: drags move fast, and a release is NEVER
+    blocked — a stuck button is worse than any missed click."""
+    engine = GestureEngine(cfg_fingers())
+    seen = []
+    engine.subscribe(lambda e: seen.append(e.intent))
+    t = 0
+    for _ in range(20):                     # latch while still (the finger
+        t += 9000                           # debounce eats the first ~6 frames)
+        engine.on_snapshot(Snapshot(right=frame(timestamp=t, **PINCH_POSE)))
+    assert Intent.SELECT_DOWN in seen
+    fast = Vec3(500.0, 0.0, 0.0)
+    for _ in range(10):                     # drag at speed: stays held
+        t += 9000
+        engine.on_snapshot(Snapshot(right=frame(
+            timestamp=t, palm_velocity=fast, **PINCH_POSE)))
+    assert Intent.SELECT_UP not in seen
+    for _ in range(10):                     # open while still fast: releases
+        t += 9000
+        engine.on_snapshot(Snapshot(right=frame(
+            timestamp=t, palm_velocity=fast, pinch_distance=80.0,
+            extended=(False, True, False, False, False))))
+    assert Intent.SELECT_UP in seen
+
+
+def test_settle_does_not_freeze_a_fast_hand():
+    """No click can latch during fast travel (the gate above), so a
+    pinch-shaped read out there must not stutter the cursor either."""
+    engine = GestureEngine(cfg_fingers())
+    in_band = 52.0          # between settle_full (50) and settle_start (55)
+    slow = frame(pinch_distance=in_band)
+    fast = frame(pinch_distance=in_band, palm_velocity=Vec3(400.0, 0.0, 0.0))
+    assert engine._settle_factor(slow) < 1.0
+    assert engine._settle_factor(fast) == 1.0

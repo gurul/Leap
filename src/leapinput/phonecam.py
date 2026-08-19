@@ -63,6 +63,14 @@ const stat = (m) => document.getElementById('stat').textContent = m;
 
 async function start(facing) {
   if (pc) { pc.close(); pc = null; }
+  // IMU permission must be requested inside the tap gesture, before any
+  // await breaks the gesture context. Denied or unavailable = no channel
+  // data; everything else works unchanged.
+  let imuOk = true;
+  try {
+    if (window.DeviceMotionEvent && DeviceMotionEvent.requestPermission)
+      imuOk = (await DeviceMotionEvent.requestPermission()) === 'granted';
+  } catch (e) { imuOk = false; }
   stat('asking for camera…');
   const stream = await navigator.mediaDevices.getUserMedia({
     audio: false,
@@ -78,6 +86,20 @@ async function start(facing) {
 
   pc = new RTCPeerConnection({ iceServers: [] });   // LAN: no STUN needed
   stream.getTracks().forEach(t => pc.addTrack(t, stream));
+  // IMU side-channel: the accelerometer rides along at 5Hz so the Mac can
+  // notice the STAND being bumped (a fixed-camera calibration guard) and
+  // know the camera's tilt. Created before the offer so it lands in SDP.
+  const imu = pc.createDataChannel('imu');
+  if (imuOk && window.DeviceMotionEvent) {
+    let last = null;
+    window.addEventListener('devicemotion', (e) => { last = e; });
+    setInterval(() => {
+      if (imu.readyState !== 'open' || !last) return;
+      const g = last.accelerationIncludingGravity || {};
+      try { imu.send(JSON.stringify(
+        { x: g.x || 0, y: g.y || 0, z: g.z || 0 })); } catch (e) {}
+    }, 200);
+  }
   // Frame rate over resolution when congestion control squeezes. 4 Mbps is
   // ~5x what VGA60 hand tracking needs; a LOWER cap also means fewer RTP
   // packets per frame, so one lost packet stalls less of the stream.
@@ -256,6 +278,14 @@ class _PhoneCapture:
 class _PhoneCamServer:
     """Owns the asyncio thread: HTTPS page + signaling + the receiving peer."""
 
+    # A fixed-camera setup is a calibration resting on the assumption that
+    # the camera does not move. The phone's own accelerometer checks that
+    # assumption: gravity is tracked with an EMA, and a deviation past this
+    # threshold (m/s^2) means the stand was BUMPED — worth telling the user,
+    # because a nudged phone silently degrades the fitted reach geometry.
+    BUMP_MS2 = 1.5
+    BUMP_WARN_EVERY_S = 5.0
+
     def __init__(self, port: int = DEFAULT_PORT):
         self.port = port
         self.token = _ensure_token()
@@ -263,6 +293,11 @@ class _PhoneCamServer:
         self.cond = threading.Condition()
         self.frame = None                  # BGR ndarray, newest wins
         self.seq = 0
+        # IMU state (written by the datachannel handler on the asyncio
+        # thread; read anywhere — tuple/float writes are atomic).
+        self.imu_gravity: tuple[float, float, float] | None = None
+        self.stand_moved_at = 0.0          # time.monotonic() of the last bump
+        self._imu_warned_at = 0.0
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
         self._pc = None
@@ -346,6 +381,18 @@ class _PhoneCamServer:
             if track.kind == "video":
                 asyncio.ensure_future(self._consume(track))
 
+        @pc.on("datachannel")
+        def on_datachannel(channel):
+            if channel.label != "imu":
+                return
+
+            @channel.on("message")
+            def on_message(message):
+                try:
+                    self._on_imu(json.loads(message))
+                except Exception:
+                    pass        # sensor telemetry must never hurt the stream
+
         @pc.on("connectionstatechange")
         async def on_state():
             print(f"phonecam: peer {pc.connectionState}", flush=True)
@@ -364,6 +411,35 @@ class _PhoneCamServer:
             content_type="application/json",
             text=json.dumps({"sdp": pc.localDescription.sdp,
                              "type": pc.localDescription.type}))
+
+    def _on_imu(self, sample: dict) -> None:
+        """One accelerometer sample -> gravity estimate + bump detection.
+
+        Gravity is the EMA of accelerationIncludingGravity; a sample far
+        from it is the stand being moved. The dynamic palm box re-anchors on
+        the next hand appearance anyway, so a small nudge self-heals — the
+        warning matters for the pieces that do NOT (working distance,
+        anything assuming the calibrated viewpoint).
+        """
+        import time as _time
+        v = (float(sample.get("x", 0.0)), float(sample.get("y", 0.0)),
+             float(sample.get("z", 0.0)))
+        g = self.imu_gravity
+        if g is None:
+            self.imu_gravity = v
+            return
+        delta = ((v[0] - g[0]) ** 2 + (v[1] - g[1]) ** 2
+                 + (v[2] - g[2]) ** 2) ** 0.5
+        self.imu_gravity = tuple(0.9 * a + 0.1 * b for a, b in zip(g, v))
+        if delta > self.BUMP_MS2:
+            now = _time.monotonic()
+            self.stand_moved_at = now
+            if now - self._imu_warned_at > self.BUMP_WARN_EVERY_S:
+                self._imu_warned_at = now
+                print("phonecam: the phone/stand just MOVED (IMU) — the "
+                      "box re-anchors on your next hand appearance; if the "
+                      "distance or angle changed, re-run "
+                      "`python -m leapinput.reach corners`", flush=True)
 
     async def _consume(self, track) -> None:
         import cv2
@@ -421,6 +497,16 @@ class PhoneSource(CameraSource):
     @property
     def url(self) -> str:
         return self._server.url
+
+    @property
+    def imu_gravity(self) -> tuple[float, float, float] | None:
+        """Phone gravity vector (m/s^2), when the page granted DeviceMotion."""
+        return self._server.imu_gravity
+
+    @property
+    def stand_moved_at(self) -> float:
+        """time.monotonic() of the last IMU-detected stand bump (0 = never)."""
+        return self._server.stand_moved_at
 
     def _open_capture(self, cv2):
         self._server.start()

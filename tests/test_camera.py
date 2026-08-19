@@ -394,3 +394,23 @@ def test_lone_left_ily_near_the_cursor_hands_last_spot_is_still_left():
                           wrist=(0.52, 0.51), elapsed_us=33_000) == "Right"
     # ...which is exactly why the capture loop bypasses it for ILY:
     assert ily_shaped(ily, Tuning())
+
+
+def test_v_shaped_matches_only_the_v_hand():
+    """The routing-time V read (paste, free hand only): index + middle out,
+    ring + pinky curled, thumb ignored — a natural peace sign often reads
+    thumb-out. Adjacent poses must NOT match, for the same reason as ILY."""
+    from leapinput.camera import PoseSignals, Tuning, v_shaped
+
+    t = Tuning()
+
+    def sig(thumb_ratio, bends):
+        return PoseSignals(bends=bends, thumb_ratio=thumb_ratio,
+                           pinch_mm=60.0, span_mm=80.0)
+
+    assert v_shaped(sig(0.7, (30, 30, 110, 110)), t)            # V sign
+    assert v_shaped(sig(1.3, (30, 30, 110, 110)), t)            # thumb-out V
+    assert not v_shaped(sig(1.3, (30, 110, 110, 110)), t)       # point
+    assert not v_shaped(sig(1.3, (30, 30, 30, 30)), t)          # open hand
+    assert not v_shaped(sig(0.7, (100, 110, 110, 100)), t)      # fist
+    assert not v_shaped(sig(1.3, (30, 110, 110, 30)), t)        # ILY

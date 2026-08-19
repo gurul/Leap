@@ -9,7 +9,7 @@ Touchless mice are a graveyard of demos that feel magical for ten seconds and un
 - **The phone is the flagship source.** iPhone Safari → WebRTC → MediaPipe, measured at **57.2 fps delivered with a 16.7 ms median frame cadence** (exact 60 Hz) and ~9 ms/frame detection: the whole pipeline tracks at 60 fps-class rates.
 - **Latency-engineered end to end.** A seven-stream research pass (WebRTC internals, Safari encoder behavior, real-time-video literature, the HFT playbook) drove receiver patches worth ~17 ms/frame plus tail-jitter fixes — all documented, all measured. See [the latency notes](docs/context/latency-research-2026-08-18.md).
 - **Verified against a corpus, not a demo.** 3,639 recorded frames of real use replay through the pipeline in CI; each pose does exactly one thing and nothing else.
-- **191 hardware-free tests in under four seconds.** All the fiddly temporal logic runs on frozen dataclasses — no device, no hands, no flakiness.
+- **244 hardware-free tests in under four seconds.** All the fiddly temporal logic runs on frozen dataclasses — no device, no hands, no flakiness.
 - **Designed to fail safe.** A separate guard process releases every mouse button if the main process dies — even to `SIGKILL`.
 
 ## How it works
@@ -91,6 +91,24 @@ Then calibrate, because the thresholds ship as guesses and your hand is the grou
 
 A few prompted rounds of open/point/pinch/fist fit your personal thresholds into `camera_tuning.json` (gitignored), which the camera sources load automatically.
 
+### Fixed camera? Fit the reach box
+
+A phone propped on a stand doesn't move — so the geometry between your resting hand and the frame is stable, and measurable. By default the *whole* frame maps to the cursor plane, which wastes most of it: your comfortable reach covers only part of the view, and covering the rest means stretching until tracking drops. The reach box fixes that — roam your hand everywhere *comfortable* for ~12 seconds and the measured envelope becomes the control surface:
+
+```bash
+.venv/bin/python -m leapinput.reach corners --source phone  # place hand at 2 corners (direct)
+.venv/bin/python -m leapinput.reach map --source phone      # or: roam and let it fit
+.venv/bin/python -m leapinput.reach test --source phone  # check it live (dry run)
+.venv/bin/python -m leapinput.reach hand --span-mm 72    # your hand's REAL size
+.venv/bin/python -m leapinput.reach show                 # or clear
+```
+
+The box is shaped like your **actual display** (Quartz-queried — here the 14.2″ MacBook Pro's 1512×982 panel), and `reach hand` calibrates your hand's real knuckle span — the ChArUco-board idea with your hand as the board, turning every physical readout from an assumption into a measurement (this setup measured its box at ~28cm: 0.93× the panel's physical 30.4cm glass, a near-1:1 touch surface). On the phone source, the **IMU rides along** over a WebRTC datachannel: if the stand gets bumped, the session tells you instead of silently degrading (LiDAR/TrueDepth are not web-reachable — real depth comes from the [LeapDepth native companion](ios/LeapDepth), scaffolded: synchronized RGB+depth over TCP, `python -m leapinput.phonedepth` to receive; see [the depth plan](docs/context/depth-companion-plan.md)).
+
+The fitted box is stored in `camera_tuning.json` and applied automatically: small comfortable motion now covers the whole screen (the deadzone and gain-curve knees rescale with the zoom, so it stays anchored to your physical hand), sensitivity stays constant as you sit nearer or farther (apparent hand size is the free monocular depth signal), and overreaching **pins the cursor at the edge** instead of losing it. `reach test` is the proof view — a live screenshot of your actual screen drawn *inside* the box on the camera feed, with a crosshair for where the cursor would be, plus dry-run recognition of the full command vocabulary on both hands. `--no-reach` ignores the box for one session.
+
+With a fitted box, **touch mapping is the camera default** — the screen works like a touchscreen sheet under your hand. The dynamic box appears centered on your palm each time your hand shows up (screen-proportioned, sized to your hand's apparent size so it's the same *physical* box at any distance), and when you overshoot an edge the box slides with you — natural cadence, not an error: the cursor rides the screen edge and responds the instant you reverse. Point at a fixed spot to put the cursor there; pinch to tap. `--map relative` restores the mouse-style clutch ratchet (the Leap's default — its lopsided reachable volume never fit absolute mapping).
+
 ### Always-on
 
 When it's good enough to live with, run it as a persistent session:
@@ -163,7 +181,9 @@ The hand the cursor doesn't follow is a second command palette — raise it alon
 
 The full dictation loop: thumbs-up (Tink) and speak, thumbs-up again (Pop — Willow pastes), free-hand ILY to submit.
 
-ILY is the one pose where which hand it's on changes the command entirely (free hand = Enter, cursor hand = pause), so it gets special routing: an ILY-shaped hand raised alone is always routed by the handedness label — the "a lone hand is probably the cursor hand" adoption rule (built for flappy fists and pinches) stands down. Left-hand ILY is Enter, even raised exactly where the cursor hand just was; it can no longer be mistaken for the pause toggle.
+ILY and the V sign get special routing: for these poses a hand raised alone is always routed by the handedness label — the "a lone hand is probably the cursor hand" adoption rule (built for flappy fists and pinches) stands down. ILY because which hand it's on changes the command entirely (free hand = Enter, cursor hand = pause); V because it *only* exists on the free hand, so adopting a lone left-hand V as the cursor hand silently swallowed every paste. Both are extended, distinctive poses the classifier labels reliably — exactly the opposite of the curled poses the adoption rule defends against.
+
+Two transition guards keep the cursor hand's own gestures from leaking into this layer: releasing a click-pinch into an open palm passes straight through the OK shape (which used to arm Mission Control every time), and a fist opens thumb-first through a perfect thumbs-up — so a button posture now casts a short (0.4s) shadow in which the matching command hold refuses to arm. Deliberate poses formed from rest are unaffected. And the cursor engine only stands down once a command hold is actually *filling* (past its arm dwell), not on the first pattern-matching frame — single-frame pose flickers no longer blank the pointer mid-gesture.
 
 ### Verified, pose by pose
 
@@ -262,6 +282,9 @@ Everything measured, plus the dead ends not worth re-exploring, is in [`docs/con
 | `src/leapinput/actions.py` | Backend seam: `QuartzBackend` (real) and `DryRunBackend` (prints) |
 | `src/leapinput/guard.py` | The separate process that releases the button if this one dies |
 | `src/leapinput/oneeuro.py` | Vendored 1€ filter — adaptive smoothing, heavy when slow, light when fast |
+| `src/leapinput/phonedepth.py` | LPD1 receiver for the LeapDepth iOS companion — synchronized RGB + metric depth over TCP (phase 1: prove the pipe) |
+| `ios/LeapDepth/` | The native depth companion: Swift + AVFoundation, TrueDepth (front) / LiDAR (rear) → LPD1 stream. The deliberate no-install exception |
+| `src/leapinput/reach.py` | Fixed-camera reach box: roam-fit the comfortable envelope, plus the live viewport test view (your screen drawn inside the box) |
 | `src/leapinput/{doctor,viz,record,calibrate}.py` | Diagnosis, live view, corpus capture, threshold fitting |
 | `scripts/` | `setup.sh` (reproducible env) · `verify-env.sh` (drift check) · `leapctl` (always-on on/off switch) |
 | `docs/context/` | Durable measured facts: [latency research](docs/context/latency-research-2026-08-18.md) · [environment](docs/context/environment.md) · [interaction model](docs/context/interaction.md) · [testing](docs/context/testing.md) · [2026-08-18 strengthening pass](docs/context/strengthening-2026-08-18.md) |
@@ -269,4 +292,4 @@ Everything measured, plus the dead ends not worth re-exploring, is in [`docs/con
 
 ## Built with
 
-Python 3.12, MediaPipe Tasks + OpenCV for hand landmarks, aiortc + aiohttp for the phone's WebRTC path, PyObjC/Quartz for `CGEventPost`, CFFI against `libLeapC.6` for the original hardware, pytest for the 191 hardware-free tests. The 1€ filter is Casiez, Roussel & Vogel (CHI 2012), vendored rather than depended on. The 2026-08-18 passes borrowed robustness patterns from [mediapipe-touchdesigner](https://github.com/torinmb/mediapipe-touchdesigner), command shapes from shipping mid-air vocabularies, and tail-latency doctrine from the quant world — details in [the strengthening notes](docs/context/strengthening-2026-08-18.md) and [the latency notes](docs/context/latency-research-2026-08-18.md).
+Python 3.12, MediaPipe Tasks + OpenCV for hand landmarks, aiortc + aiohttp for the phone's WebRTC path, PyObjC/Quartz for `CGEventPost`, CFFI against `libLeapC.6` for the original hardware, pytest for the 244 hardware-free tests. The 1€ filter is Casiez, Roussel & Vogel (CHI 2012), vendored rather than depended on. The 2026-08-18 passes borrowed robustness patterns from [mediapipe-touchdesigner](https://github.com/torinmb/mediapipe-touchdesigner), command shapes from shipping mid-air vocabularies, and tail-latency doctrine from the quant world — details in [the strengthening notes](docs/context/strengthening-2026-08-18.md) and [the latency notes](docs/context/latency-research-2026-08-18.md).

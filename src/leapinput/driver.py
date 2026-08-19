@@ -13,8 +13,9 @@ import sys
 from dataclasses import dataclass
 
 from .actions import Backend
+from .camera import plane_norm
 from .oneeuro import OneEuroPlane
-from .capture import HandFrame
+from .capture import HandFrame, Vec3
 from .gestures import Intent, IntentEvent
 
 
@@ -114,6 +115,15 @@ class Mapping:
     edge_max_deg: float = 62.0
 
     scroll_gain: float = 1.0
+
+    # Absolute mapping: the virtual plane IS the main screen — hand position
+    # maps to cursor position directly, no clutch ratchet, no speed gain. Only
+    # sane for a camera source with a fitted reach box (python -m
+    # leapinput.reach map): the box makes the comfortable reach exactly one
+    # screen, which is what made absolute unusable on the Leap's lopsided
+    # reachable slab. The screen floats in hand space; point at a spot to put
+    # the cursor there.
+    absolute: bool = False
 
     # 1 euro filter seeds for the pointer. Defaults tuned for the Leap at 111fps;
     # the camera source lowers min_cutoff and raises beta (see camera.tune_for_camera)
@@ -262,6 +272,9 @@ class DirectDriver:
         # Only the two plane axes are read, filtered or integrated. The off-plane
         # axis gates (engage floor, edge guard) but never contributes to position.
         p = frame.track_point(self.map.tracking_point)
+        if self.map.absolute:
+            self._move_absolute(p, frame.timestamp, settle)
+            return
         raw_v = -p.y if self.map.plane == "xy" else p.z
         fx, vertical = self._filter(p.x, raw_v, frame.timestamp / 1e6)
 
@@ -286,7 +299,14 @@ class DirectDriver:
             dz_mm = -dz_mm
 
         v = frame.palm_velocity
-        gain = self._gain(math.hypot(v.x, v.y if self.map.plane == "xy" else v.z))
+        # Distance compensation (camera sources): motion_scale restores the
+        # physical meaning of both the delta and the speed the gain curve
+        # reads, so sensitivity feels the same near the camera and far from
+        # it. Applied AFTER the deadzone check — image-space noise does not
+        # grow with distance, so the noise floor must not be magnified.
+        gain = self._gain(math.hypot(v.x, v.y if self.map.plane == "xy" else v.z)
+                          * frame.motion_scale)
+        gain *= frame.motion_scale
         # Freeze progressively as a click forms, so the pinch cannot drag the
         # cursor off the target it was aimed at.
         gain *= event.data.get("settle", 1.0)
@@ -295,6 +315,30 @@ class DirectDriver:
             return
         px, py = self.x, self.y
         self.x, self.y = self._contain(self.x + dx_mm * gain, self.y + dz_mm * gain)
+        if self._button_down:
+            self._travel += math.hypot(self.x - px, self.y - py)
+        self.backend.move(self.x, self.y)
+
+    def _move_absolute(self, p: Vec3, timestamp_us: int, settle: float) -> None:
+        """Hand position -> cursor position on the main screen.
+
+        Filtered in plane mm (where the 1 euro seeds were tuned), then scaled
+        to pixels. The settle ramp lerps toward the target instead of scaling
+        a delta — same freeze-as-the-pinch-forms behaviour, absolute flavour.
+        A reach-box clamp upstream means an overreached hand pins the cursor
+        at the screen edge rather than losing it.
+        """
+        fx, fy = self._filter(p.x, p.y, timestamp_us / 1e6)
+        nx, ny = plane_norm(Vec3(fx, fy, 0.0))
+        tx, ty = nx * (self.w - 1.0), ny * (self.h - 1.0)
+        if settle <= 0.0:
+            return
+        px, py = self.x, self.y
+        self.x, self.y = self._contain(px + (tx - px) * settle,
+                                       py + (ty - py) * settle)
+        if math.hypot(self.x - px, self.y - py) < 1.5:
+            self.x, self.y = px, py     # touch deadband: residual filter
+            return                      # noise must not paint pixels
         if self._button_down:
             self._travel += math.hypot(self.x - px, self.y - py)
         self.backend.move(self.x, self.y)

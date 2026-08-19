@@ -56,6 +56,16 @@ class HandFrame:
     index_tip: Vec3 = None      # the default tracked point
     knuckles: tuple[Vec3, ...] = ()   # index..pinky MCP joints; see `center`
 
+    # Distance compensation for monocular sources: how much to scale MOTION
+    # (relative deltas, speeds) so one physical centimetre of hand travel means
+    # the same thing at any distance from the camera. The camera derives it
+    # from apparent knuckle span (image size ~ 1/distance — the free depth
+    # proxy; the signal a Depth Anything integration would buy at model cost).
+    # 1.0 = at the calibrated reference distance, and always 1.0 for sources
+    # with real depth (the Leap). Positions are NOT scaled — the reach box is
+    # a frame region and absolute mapping must stay position-faithful.
+    motion_scale: float = 1.0
+
     @property
     def extended_count(self) -> int:
         return sum(self.extended)

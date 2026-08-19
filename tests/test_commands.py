@@ -340,3 +340,89 @@ def test_cursor_hand_ily_pauses_and_never_enters():
     assert not [e for e in fired if e.command is Command.ENTER]
 
 
+
+
+# --- transition shadows and busy gating --------------------------------------
+# The live failure: releasing a click-pinch into an open palm passes through
+# the OK shape (back fingers out, thumb-index still close), which armed
+# mission control — and `busy` blanked the cursor engine from the very first
+# pattern-matching frame.
+
+CLICK_PINCH = (False, True, False, False, False)
+
+
+def test_busy_waits_for_the_arm_time():
+    """One pattern-matching frame must NOT blank the cursor engine — busy
+    begins when the ring does, after the arm dwell."""
+    engine = CommandEngine(hand="Right")
+    t = FRAME_US
+    engine.on_snapshot(Snapshot(right=frame("Right", t, OPEN, pinch=30.0)))
+    assert not engine.busy
+    while t < 400_000:                      # well past arm (0.15s)
+        t += FRAME_US
+        engine.on_snapshot(Snapshot(right=frame("Right", t, OPEN, pinch=30.0)))
+    assert engine.busy
+
+
+def test_pinch_release_transition_never_arms_mission():
+    engine = CommandEngine(hand="Right")
+    fired = []
+    engine.subscribe(lambda e: fired.append(e))
+    t = 0
+    for _ in range(10):                     # a click-pinch, held
+        t += FRAME_US
+        engine.on_snapshot(Snapshot(
+            right=frame("Right", t, CLICK_PINCH, pinch=15.0)))
+    for _ in range(9):                      # ~0.3s of opening: OK-shaped frames
+        t += FRAME_US
+        engine.on_snapshot(Snapshot(right=frame("Right", t, OPEN, pinch=30.0)))
+        assert not engine.mission.armed, "transition frames must not arm"
+        assert not engine.busy
+    for _ in range(15):                     # fully open
+        t += FRAME_US
+        engine.on_snapshot(Snapshot(right=frame("Right", t, OPEN, pinch=80.0)))
+    assert not [e for e in fired if e.command is Command.MISSION_CONTROL]
+
+
+def test_deliberate_ok_pose_from_rest_still_fires_mission():
+    engine = CommandEngine(hand="Right")
+    fired = []
+    engine.subscribe(lambda e: fired.append(e))
+    t = 0
+    for _ in range(20):                     # resting open hand, no shadow
+        t += FRAME_US
+        engine.on_snapshot(Snapshot(right=frame("Right", t, OPEN, pinch=80.0)))
+    for _ in range(25):                     # OK pose past arm + dwell
+        t += FRAME_US
+        engine.on_snapshot(Snapshot(right=frame("Right", t, OPEN, pinch=30.0)))
+    for _ in range(15):                     # release commits
+        t += FRAME_US
+        engine.on_snapshot(Snapshot(right=frame("Right", t, OPEN, pinch=80.0)))
+    assert [e for e in fired if e.command is Command.MISSION_CONTROL]
+
+
+def test_fist_release_transition_never_arms_dictation():
+    """A fist opens thumb-first — a perfect thumbs-up for a few frames."""
+    engine = CommandEngine(hand="Right")
+    t = 0
+    for _ in range(10):
+        t += FRAME_US
+        engine.on_snapshot(Snapshot(
+            right=frame("Right", t, (False,) * 5, pinch=20.0)))
+    for _ in range(9):                      # ~0.3s of thumb-first opening
+        t += FRAME_US
+        engine.on_snapshot(Snapshot(
+            right=frame("Right", t, THUMBS_UP, pinch=40.0)))
+        assert not engine.dictate.armed
+
+
+def test_thumbs_up_formed_without_a_fist_arms_immediately():
+    """The shadow must cost nothing on the normal path: a thumbs-up that never
+    passed through a full fist (thumb was always out) arms on schedule."""
+    engine = CommandEngine(hand="Right")
+    t = 0
+    for _ in range(20):                     # thumbs-up held ~0.66s
+        t += FRAME_US
+        engine.on_snapshot(Snapshot(
+            right=frame("Right", t, THUMBS_UP, pinch=40.0)))
+    assert engine.dictate.progress(t / 1e6) > 0.0

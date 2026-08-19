@@ -100,3 +100,23 @@ def test_tuning_round_trips_through_json(tmp_path):
     loaded = Tuning.load(p)
     assert loaded == t
     assert Tuning.load(tmp_path / "missing.json") == Tuning()
+
+
+def test_fit_preserves_setup_calibration(tmp_path):
+    """Refitting pose thresholds must never wipe the reach box, working
+    distance, hand span, or anchor mode — the live bug this pins: fit()
+    built its result from DEFAULT Tuning, so one `calibrate analyze` would
+    have silently destroyed the whole setup calibration."""
+    import json as _json
+
+    from leapinput.calibrate import fit
+
+    rows = [_json.loads(line) for line in open("camera_session.jsonl")]
+    base = Tuning(reach_x0=0.55, reach_y0=0.48, reach_x1=0.85, reach_y1=0.79,
+                  ref_span_img=0.058, hand_span_mm=72.0, reach_center="palm")
+    tuning, _ = fit(rows, base=base)
+    assert tuning.reach == (0.55, 0.48, 0.85, 0.79)
+    assert tuning.ref_span_img == 0.058
+    assert tuning.hand_span_mm == 72.0
+    assert tuning.reach_center == "palm"
+    assert tuning.pinch_on_mm != Tuning().pinch_on_mm    # thresholds DID refit
