@@ -4,9 +4,9 @@
 ILY pose that resumes it); ✊ = off. The menu toggles the session (via
 scripts/leapctl, the single owner of start/stop), pauses/resumes without
 stopping (SIGUSR1 — the ILY pose's terminal-side twin), and opens the log.
-"Turn on" starts the phone source, so the WebRTC server is up before the
-phone's bookmark is opened — no phone yet just means the session idles
-until the stream starts.
+"Turn on" starts the default camera source (the built-in webcam — chosen as
+the daily driver 2026-08-19; the phone/WebRTC path remains available as a
+feature via `leapctl on --source phone`).
 Built on rumps, which is a thin layer over the PyObjC we already ship.
 
 Run it with `leapinput-menubar` (keep it in the background: `nohup ... &`).
@@ -67,9 +67,9 @@ class LeapMenuBar(rumps.App):
 
     def toggle(self, _) -> None:
         if self.state() == "off":
-            # Phone is the flagship source: bring the WebRTC server up with
-            # the session so the phone's bookmark connects without a terminal.
-            ctl("on", "--source", "phone")
+            # Default source (built-in camera): on and tracking with zero
+            # ceremony. The phone/WebRTC path is opt-in via the CLI.
+            ctl("on")
         else:
             ctl("off")
         self.refresh()
