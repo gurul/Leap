@@ -1,5 +1,7 @@
 # Leap
 
+![Leap — your webcam is a hand-tracking input device for your Mac](docs/assets/hero.png)
+
 **Your webcam is a hand-tracking input device for your Mac.** Point to move
 the cursor, pinch to click, make a fist to drag — the built-in camera is the
 daily driver, with no setup and no special hardware anywhere. Any faster
