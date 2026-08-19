@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import math
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Callable, Optional
 
 # Optional: this module defines the framework-free HandFrame/Snapshot types that
@@ -170,11 +170,36 @@ def _make_listener(sink: Callable[[Snapshot], None]):
     """
 
     class _Listener(leap.Listener):
+        def __init__(self):
+            super().__init__()
+            # Last ORIGINAL frame per side, for the dropout hold below.
+            self._prev: dict[str, Optional[HandFrame]] = {}
+
         def on_tracking_event(self, event):
             snap = Snapshot()
             for hand in event.hands:
                 frame = HandFrame.of(hand, event.tracking_frame_id, event.timestamp)
                 setattr(snap, frame.side.lower(), frame)
+                self._prev[frame.side] = frame
+            # Leap dropouts are whole-hand blips of a frame or two, same shape
+            # as the camera source's occlusion failures. Hold the last frame
+            # through sub-150ms flickers so a mid-pinch dropout cannot release
+            # the button; a hand deliberately removed still hard-disengages
+            # ~150ms later.
+            for side in ("Left", "Right"):
+                if snap.get(side) is None:
+                    held = self._prev.get(side)
+                    if held is not None and event.timestamp - held.timestamp < 150_000:
+                        # RESTAMP the held frame and freeze its velocity — the
+                        # engine clocks off frame timestamps, and the stale
+                        # velocity would spike the gain curve.
+                        # _prev keeps the ORIGINAL frame: the 150ms age check
+                        # still expires, and reappearance velocity uses true dt.
+                        setattr(snap, side.lower(), replace(
+                            held, timestamp=event.timestamp,
+                            palm_velocity=Vec3(0.0, 0.0, 0.0)))
+                    else:
+                        self._prev[side] = None
             sink(snap)
 
     return _Listener()

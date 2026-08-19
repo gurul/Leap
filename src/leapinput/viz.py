@@ -19,6 +19,7 @@ import time
 from typing import Callable, Optional
 
 from .capture import HandFrame, LeapSource, Snapshot
+from .gestures import Config
 
 ESC = "\033["
 DIM, BOLD, RESET = f"{ESC}2m", f"{ESC}1m", f"{ESC}0m"
@@ -92,7 +93,7 @@ def _spatial(frame: Optional[HandFrame]) -> list[str]:
 
 
 def render(frame: Optional[HandFrame], target: Optional[tuple] = None,
-           hand: str = "Right") -> list[str]:
+           hand: str = "Right", engage_y: float = Config().engage_y) -> list[str]:
     """Return exactly PANEL_LINES lines describing the current frame."""
     width = min(shutil.get_terminal_size((80, 24)).columns, 72)
     rule = DIM + "─" * width + RESET
@@ -113,7 +114,9 @@ def render(frame: Optional[HandFrame], target: Optional[tuple] = None,
             (GREEN + f"{n}●" + RESET) if ext else (DIM + f"{n}·" + RESET)
             for n, ext in zip(names, frame.extended)
         )
-        engaged = (GREEN + "engaged" + RESET) if p.y > 90 else (YELLOW + "too low" + RESET)
+        # Same threshold the engine engages at — a hardcoded copy here would let
+        # the badge show green in a band where the engine cannot engage.
+        engaged = (GREEN + "engaged" + RESET) if p.y > engage_y else (YELLOW + "too low" + RESET)
         lines.append(f"  {BOLD}{frame.side.upper()}{RESET} hand   "
                      f"{DIM}id{RESET} {frame.hand_id}   {engaged}")
         lines += _spatial(frame)

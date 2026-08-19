@@ -219,6 +219,18 @@ class Config:
     pinch_off_mm: float = 68.0
     pinch_dwell: float = 0.03
     pinch_min_strength: float = 0.50
+    # Deep-commit gate (2026-08-19, fitted from live phone-session telemetry):
+    # a relaxed pointing hand parks the thumb 28-45 pseudo-mm from the index —
+    # on top of a pinch_on fitted to separate pinches from OPEN hands — so
+    # slow rest-band drift through pinch_on read as clicks. In the recorded
+    # corpus every deliberate pinch bottomed <= 25.6mm (a pinch is a CONTACT
+    # event) while drift bottomed >= 28.2mm; depth separates the classes,
+    # speed does not (slow deliberate pinches exist). When set, the pinch
+    # Schmitt FIRES at this deeper distance while pinch_off, the release
+    # assist, and the settle ramp stay put — the cursor is already fully
+    # frozen through the extra descent. None = fire at pinch_on (the Leap,
+    # whose real depth signal never had the rest-band overlap).
+    pinch_commit_mm: Optional[float] = None
     # KINEMATIC gate on pinch ONSET (fingers-ladder path): a pinch may only
     # LATCH while the hand is slow. People decelerate to near-stillness before
     # selecting (Fitts final approach; RIDS, UIST 2022, detects selection FROM
@@ -357,7 +369,10 @@ class GestureEngine:
             self.cfg.engage_y_xy if xy else self.cfg.engage_y,
             self.cfg.release_y_xy if xy else self.cfg.release_y,
             self.cfg.engage_dwell)
-        self.pinch = Schmitt(self.cfg.pinch_on_mm, self.cfg.pinch_off_mm, self.cfg.pinch_dwell)
+        pinch_fire = (self.cfg.pinch_commit_mm
+                      if self.cfg.pinch_commit_mm is not None
+                      else self.cfg.pinch_on_mm)
+        self.pinch = Schmitt(pinch_fire, self.cfg.pinch_off_mm, self.cfg.pinch_dwell)
         self._pinch_slack_since: Optional[float] = None    # release assist
         self.grab = Schmitt(self.cfg.grab_on, self.cfg.grab_off, self.cfg.grab_dwell)
         # on_at < off_at: a SMALL angle means palm-down means engaged.
@@ -424,8 +439,14 @@ class GestureEngine:
 
         # Tracking lost: release everything held, then disengage. Order matters —
         # a held button must come up before the pointer stops being driven.
+        # The finger ladder resets too: a debounced count of 0 surviving the
+        # loss means the first frames of a reappearing hand read as FIST and
+        # fire a phantom GRAB_DOWN at the parked cursor. 5 = 'lifted' is the
+        # constructor state; the hand must re-earn its count through the hold.
         if frame is None:
             self._release_all(None)
+            if self.fingers.value != 5:
+                self.fingers = Debounce(5, self.cfg.finger_hold)
             if self.engaged.force_off():
                 self._emit(Intent.DISENGAGE, None)
             return
@@ -435,6 +456,10 @@ class GestureEngine:
             self._emit(Intent.ENGAGE, frame)
         elif edge is False:
             self._release_all(frame)
+            # Same ladder reset as tracking loss: a count latched before the
+            # drop must not be trusted on re-engage.
+            if self.fingers.value != 5:
+                self.fingers = Debounce(5, self.cfg.finger_hold)
             self._emit(Intent.DISENGAGE, frame)
 
         if not self.engaged.state:

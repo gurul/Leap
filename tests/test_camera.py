@@ -414,3 +414,120 @@ def test_v_shaped_matches_only_the_v_hand():
     assert not v_shaped(sig(1.3, (30, 30, 30, 30)), t)          # open hand
     assert not v_shaped(sig(0.7, (100, 110, 110, 100)), t)      # fist
     assert not v_shaped(sig(1.3, (30, 110, 110, 30)), t)        # ILY
+
+
+# --- capture-loop loss hardening (2026-08-19) ---------------------------------
+
+def _engine_mid_grab():
+    """A real GestureEngine driven into a held grab by direct fist frames,
+    plus the intent log — the 'button is down' precondition for the release
+    tests below."""
+    engine = GestureEngine(Config(plane="xy", clutch_mode="fingers",
+                                  engage_dwell=0.0))
+    seen: list[Intent] = []
+    engine.subscribe(lambda e: seen.append(e.intent))
+    t = 0
+    for _ in range(30):
+        t += 33_000
+        f = handframe_of(_image(0.5, 0.5), FIST, "Right", 1, t)
+        engine.on_snapshot(Snapshot(right=f))
+    assert Intent.GRAB_DOWN in seen and Intent.GRAB_UP not in seen
+    return engine, seen
+
+
+def test_a_stream_stall_releases_held_input_exactly_once():
+    """The read loop's not-ok branch used to sleep+continue forever, never
+    reaching the release path — an unplugged camera or a stopped phone stream
+    left a held button down indefinitely. Failed reads outlasting the 150ms
+    flicker budget must dispatch one empty Snapshot (the engine's release
+    path) and then go quiet until frames return."""
+    import threading as th
+    import time as tm
+
+    from leapinput.camera import CameraSource
+
+    class DeadCap:
+        def read(self):
+            return (False, None)
+
+        def grab(self):
+            pass
+
+    src = CameraSource(hand="Right", screen_aspect=1512 / 982)
+    engine, seen = _engine_mid_grab()
+    src.subscribe(engine.on_snapshot)
+    src._prev["Right"] = handframe_of(_image(0.5, 0.5), FIST, "Right", 1, 0)
+    src._reach_now["Right"] = (0.3, 0.3, 0.6, 0.6)
+    worker = th.Thread(target=src._run, args=(None, None, DeadCap(), None),
+                       daemon=True)
+    worker.start()
+    deadline = tm.monotonic() + 2.0
+    while src.frames == 0 and tm.monotonic() < deadline:
+        tm.sleep(0.01)
+    try:
+        assert src.frames == 1, "stall never dispatched a release"
+        assert Intent.GRAB_UP in seen and Intent.DISENGAGE in seen
+        assert src._prev["Right"] is None       # next appearance re-centres
+        # ...unless it is quick and nearby: the dying box is stashed so a
+        # brief stream hiccup does not cost the hand its aim (RC-1).
+        assert src._reach_now["Right"] is None
+        gone_box, _ = src._reach_gone["Right"]
+        assert gone_box == (0.3, 0.3, 0.6, 0.6)
+        tm.sleep(0.2)                           # stall persists...
+        assert src.frames == 1                  # ...but releases only ONCE
+    finally:
+        src._stop.set()
+        worker.join(timeout=2.0)
+
+
+def test_a_capture_thread_crash_releases_held_input_and_reraises():
+    """A detection (or subscriber) exception used to kill the daemon thread
+    with no final dispatch: buttons stayed held while the process lived. The
+    loop must release via one empty Snapshot on the way out — each subscriber
+    guarded, so a crashing one cannot block the engine's release — and still
+    re-raise so the traceback reaches stderr."""
+    import pytest
+
+    from leapinput.camera import CameraSource
+
+    class FakeCv2:
+        COLOR_BGR2RGB = 0
+
+        def flip(self, bgr, code):
+            return bgr
+
+        def cvtColor(self, bgr, code):
+            return bgr
+
+    class FakeMp:
+        class ImageFormat:
+            SRGB = 0
+
+        @staticmethod
+        def Image(image_format=None, data=None):
+            return object()
+
+    class LiveCap:
+        def read(self):
+            return (True, object())
+
+        def grab(self):
+            pass
+
+    class CrashingLandmarker:
+        def detect_for_video(self, image, ms):
+            raise RuntimeError("mediapipe crashed")
+
+    src = CameraSource(hand="Right", screen_aspect=1512 / 982)
+    engine, seen = _engine_mid_grab()
+
+    def bad_subscriber(snap):
+        raise ValueError("subscriber crashed")
+
+    src.subscribe(bad_subscriber)               # ahead of the engine
+    src.subscribe(engine.on_snapshot)
+    src._prev["Right"] = handframe_of(_image(0.5, 0.5), FIST, "Right", 1, 0)
+    with pytest.raises(RuntimeError, match="mediapipe crashed"):
+        src._run(FakeCv2(), FakeMp(), LiveCap(), CrashingLandmarker())
+    assert Intent.GRAB_UP in seen and Intent.DISENGAGE in seen
+    assert src._prev["Right"] is None

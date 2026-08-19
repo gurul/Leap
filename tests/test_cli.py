@@ -6,8 +6,11 @@ argparse default silently overwrote it with False on every default run.
 """
 
 import argparse
+from types import SimpleNamespace
 
-from leapinput.cli import resolve_source_defaults
+import leapinput.cli as cli
+from leapinput.cli import _mic_desync_fix, _overlay_status, _StallWatch, \
+    resolve_source_defaults
 
 
 def parse(source: str, *extra: str) -> argparse.Namespace:
@@ -51,3 +54,76 @@ def test_map_defaults_touch_for_cameras_relative_for_leap():
     assert parse("leap").map == "relative"
     assert parse("camera").map == "touch"
     assert parse("phone").map == "touch"
+
+
+# --- preview status line (FH-2): busy must name the hold, not blame the ---
+# --- clutch --------------------------------------------------------------
+
+class FakeCv2:
+    """Records the status text; the constants only need to exist."""
+    FONT_HERSHEY_SIMPLEX = 0
+    LINE_AA = 0
+
+    def __init__(self):
+        self.texts = []
+
+    def putText(self, bgr, text, *a, **k):
+        self.texts.append(text)
+
+
+def draw_status(busy: bool, label: str = "dictate") -> list[str]:
+    fake = FakeCv2()
+    bgr = SimpleNamespace(shape=(480, 640, 3))
+    engine = SimpleNamespace(clutch=SimpleNamespace(state=False),
+                             grab=SimpleNamespace(state=False),
+                             pinch=SimpleNamespace(state=False))
+    command_engine = SimpleNamespace(
+        busy=busy, overlay={"label": label, "progress": 0.5, "rect": None})
+    _overlay_status(fake, bgr, engine, tracked=object(), last_intent="-",
+                    stats=None, command_engine=command_engine)
+    return fake.texts
+
+
+def test_status_line_names_the_command_hold_while_busy():
+    texts = draw_status(busy=True, label="dictate")
+    assert any("COMMAND HOLD" in t and "dictate" in t for t in texts)
+    assert not any("LIFTED" in t for t in texts)
+
+
+def test_status_line_still_says_lifted_when_no_hold_owns_the_input():
+    texts = draw_status(busy=False)
+    assert any("LIFTED" in t for t in texts)
+
+
+# --- dictation watchdog desync fix (FH-3 / SI-1 wiring) -------------------
+
+def test_mic_desync_closure_flips_the_flag_and_plays_the_off_cue(monkeypatch):
+    played = []
+    monkeypatch.setattr(cli, "_play", played.append)
+    command_engine = SimpleNamespace(_dictating=True)
+    _mic_desync_fix(command_engine)()
+    assert command_engine._dictating is False
+    assert played == ["Pop"]        # the mic-off cue _announce uses
+
+
+# --- frame-stream stall watchdog (TL-1) ------------------------------------
+
+def test_stall_watch_releases_once_and_warns_after_the_stream_ran():
+    w = _StallWatch(stall_s=0.5)
+    assert w.update(0, 0.0) == (False, False)       # baseline
+    assert w.update(1, 0.1) == (False, False)       # advancing
+    assert w.update(2, 0.2) == (False, False)
+    assert w.update(2, 0.4) == (False, False)       # stalled, under threshold
+    assert w.update(2, 0.8) == (True, True)         # release + warn, once
+    assert w.update(2, 5.0) == (False, False)       # no repeat while stalled
+    assert w.update(3, 5.1) == (False, False)       # recovery resets
+    assert w.update(3, 5.8) == (True, True)         # a second stall warns again
+
+
+def test_stall_watch_stays_quiet_when_the_stream_never_started():
+    """The phone source legitimately idles before the browser connects: the
+    idempotent release still fires, but no scary warning."""
+    w = _StallWatch(stall_s=0.5)
+    assert w.update(0, 0.0) == (False, False)
+    assert w.update(0, 0.6) == (True, False)        # release yes, warn no
+    assert w.update(0, 9.0) == (False, False)

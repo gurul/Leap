@@ -240,7 +240,7 @@ def _ensure_cert() -> tuple[Path, Path]:
             ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
              "-days", "3650", "-subj", "/CN=leapinput-phonecam",
              "-keyout", str(key), "-out", str(cert)],
-            check=True, capture_output=True)
+            check=True, capture_output=True, timeout=30)
     return cert, key
 
 
@@ -311,7 +311,8 @@ class _PhoneCamServer:
         self._thread = threading.Thread(
             target=self._thread_main, name="phonecam", daemon=True)
         self._thread.start()
-        self._ready.wait(timeout=10)
+        if not self._ready.wait(timeout=10):
+            raise RuntimeError("phonecam server did not start within 10s")
         if self._start_error is not None:
             raise RuntimeError(
                 f"phonecam server failed to start: {self._start_error}")

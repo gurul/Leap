@@ -95,6 +95,24 @@ def test_early_release_cancels():
     assert hold.progress(0.6) == 0.0
 
 
+def test_hand_loss_at_a_full_ring_cancels_instead_of_firing():
+    """A vanished hand is a tracking loss, not a release — the hold must
+    reset without committing (present=False past grace is the cancel path)."""
+    hold = PoseHold(arm=0.1, dwell=0.5)
+    t = 0.0
+    while t < 0.8:                          # held to a full ring
+        assert hold.update(True, t) is False
+        t += 0.033
+    assert hold.progress(t) == 1.0
+    # a single lost frame inside grace is still just a flicker
+    assert hold.update(False, t + 0.03, present=False) is False
+    assert hold.update(True, t + 0.06) is False
+    # loss past grace: reset, NO fire
+    assert hold.update(False, t + 0.10, present=False) is False
+    assert hold.update(False, t + 0.30, present=False) is False
+    assert hold.progress(t + 0.4) == 0.0
+
+
 # --- pose tests --------------------------------------------------------------
 
 def test_pose_predicates():
@@ -118,8 +136,12 @@ def test_frame_rect_is_the_index_tip_diagonal():
 
 # --- the engine --------------------------------------------------------------
 
-def hold_release(engine, make_snap, hold_s, release_extended=OPEN):
-    """Drive: pose held hold_s seconds at 30fps, then 0.5s of released frames."""
+def hold_release(engine, make_snap, hold_s, release_extended=OPEN,
+                 release_side="Right"):
+    """Drive: pose held hold_s seconds at 30fps, then 0.5s of released frames.
+    The releasing hand(s) stay TRACKED with the pose off — a deliberate
+    release. A hand that VANISHES at a full ring is a tracking loss, which
+    cancels instead of committing (see the loss tests)."""
     fired = []
     engine.subscribe(lambda e: fired.append(e))
     t = 0
@@ -128,7 +150,14 @@ def hold_release(engine, make_snap, hold_s, release_extended=OPEN):
         engine.on_snapshot(make_snap(t))
     for _ in range(15):
         t += FRAME_US
-        engine.on_snapshot(Snapshot(right=frame("Right", t, release_extended)))
+        if release_side == "Both":
+            engine.on_snapshot(Snapshot(
+                left=frame("Left", t, release_extended),
+                right=frame("Right", t, release_extended)))
+        elif release_side == "Left":
+            engine.on_snapshot(Snapshot(left=frame("Left", t, release_extended)))
+        else:
+            engine.on_snapshot(Snapshot(right=frame("Right", t, release_extended)))
     return fired
 
 
@@ -137,7 +166,7 @@ def test_finger_frame_spawns_a_pane_with_the_rect():
     fired = hold_release(
         engine,
         lambda t: both_hands(t, Vec3(-80.0, 260.0, 0.0), Vec3(80.0, 380.0, 0.0)),
-        hold_s=1.0)
+        hold_s=1.0, release_side="Both")
     panes = [e for e in fired if e.command is Command.NEW_PANE]
     assert len(panes) == 1
     x0, y0, x1, y1 = panes[0].data["rect"]
@@ -149,7 +178,7 @@ def test_a_short_frame_hold_is_a_no_op():
     fired = hold_release(
         engine,
         lambda t: both_hands(t, Vec3(-80.0, 260.0, 0.0), Vec3(80.0, 380.0, 0.0)),
-        hold_s=0.3)
+        hold_s=0.3, release_side="Both")
     assert not [e for e in fired if e.command is Command.NEW_PANE]
 
 
@@ -286,7 +315,7 @@ def test_free_hand_pinch_hold_copies():
         engine,
         lambda t: Snapshot(left=frame("Left", t, (False, True, True, True, True),
                                       pinch=30.0)),
-        hold_s=0.9)
+        hold_s=0.9, release_side="Left")
     assert [e for e in fired if e.command is Command.COPY]
     assert not [e for e in fired if e.command is Command.MISSION_CONTROL]
 
@@ -294,7 +323,8 @@ def test_free_hand_pinch_hold_copies():
 def test_free_hand_v_sign_pastes():
     engine = CommandEngine(hand="Right")
     fired = hold_release(
-        engine, lambda t: Snapshot(left=frame("Left", t, V_POSE)), hold_s=0.9)
+        engine, lambda t: Snapshot(left=frame("Left", t, V_POSE)), hold_s=0.9,
+        release_side="Left")
     assert [e for e in fired if e.command is Command.PASTE]
 
 
@@ -327,7 +357,8 @@ def test_new_pose_predicates():
 def test_free_hand_ily_fires_enter_not_pause():
     engine = CommandEngine(hand="Right")
     fired = hold_release(
-        engine, lambda t: Snapshot(left=frame("Left", t, ILY)), hold_s=0.9)
+        engine, lambda t: Snapshot(left=frame("Left", t, ILY)), hold_s=0.9,
+        release_side="Left")
     assert [e for e in fired if e.command is Command.ENTER]
     assert not [e for e in fired if e.command is Command.TOGGLE]
 
@@ -414,6 +445,55 @@ def test_fist_release_transition_never_arms_dictation():
         engine.on_snapshot(Snapshot(
             right=frame("Right", t, THUMBS_UP, pinch=40.0)))
         assert not engine.dictate.armed
+
+
+def test_hand_vanishing_at_a_full_ring_fires_no_command():
+    """Engine-level loss regression: an OK pose held past a full ring, then
+    the hand vanishes — tracking loss must cancel, never release-fire."""
+    wall = {"t": 0.0}
+    engine = CommandEngine(hand="Right", clock=lambda: wall["t"])
+    fired = []
+    engine.subscribe(lambda e: fired.append(e))
+    t = 0
+    ok = (False, True, True, True, True)
+    while t / 1e6 < 0.9:                    # held well past arm + dwell
+        t += FRAME_US
+        wall["t"] = t / 1e6
+        engine.on_snapshot(Snapshot(right=frame("Right", t, ok, pinch=30.0)))
+    assert engine.mission.progress(t / 1e6) == 1.0
+    for _ in range(15):                     # hand gone, well past grace
+        wall["t"] += FRAME_US / 1e6
+        engine.on_snapshot(Snapshot())
+    assert fired == []
+
+
+def test_free_hand_holds_never_blank_the_cursor():
+    """COPY/PASTE/ENTER live on the hand the cursor ignores — arming them
+    must not set `busy`, which would force-release an in-progress drag on
+    the cursor hand."""
+    engine = CommandEngine(hand="Right")
+    t = 0
+    while t < 400_000:                      # well past arm (0.15s)
+        t += FRAME_US
+        engine.on_snapshot(Snapshot(left=frame("Left", t, V_POSE)))
+    assert engine.paste.progress(t / 1e6) > 0.0
+    assert not engine.busy
+
+
+def test_pinch_shadow_blocks_the_pause_toggle():
+    """A held click-pinch sheds ILY-shaped misread frames (middle+ring stay
+    curled); arming the pause there would blank the cursor engine mid-drag."""
+    engine = CommandEngine(hand="Right")
+    t = 0
+    for _ in range(10):                     # a click-pinch, held (dragging)
+        t += FRAME_US
+        engine.on_snapshot(Snapshot(
+            right=frame("Right", t, CLICK_PINCH, pinch=15.0)))
+    for _ in range(9):                      # ILY-shaped misreads, pinch closed
+        t += FRAME_US
+        engine.on_snapshot(Snapshot(right=frame("Right", t, ILY, pinch=15.0)))
+        assert not engine.toggle.armed, "shadowed frames must not arm the pause"
+        assert not engine.busy
 
 
 def test_thumbs_up_formed_without_a_fist_arms_immediately():

@@ -119,10 +119,14 @@ class PoseHold:
             return 0.0
         return min(1.0, t / self.dwell)
 
-    def update(self, active: bool, now: float) -> bool:
+    def update(self, active: bool, now: float, present: bool = True) -> bool:
         """Feed the per-frame pose test. Returns True exactly once: on the
         release that commits the command (or, with `fire_on_fill`, the frame
-        the ring fills)."""
+        the ring fills). `present` is whether the hand(s) this pose reads are
+        tracked at all: a release with the hand still tracked commits, but a
+        hand that VANISHES is a tracking loss — after the same grace (routine
+        single-frame landmark dropouts still survive it), the hold resets
+        WITHOUT firing. Never commit on a hand that is no longer there."""
         if active:
             self._inactive_since = None
             if self._active_since is None:
@@ -139,7 +143,7 @@ class PoseHold:
             self._inactive_since = now
         if now - self._inactive_since < self.grace:
             return False                # single-frame flicker: still held
-        fired = (not self._fired
+        fired = (present and not self._fired
                  and self.progress(self._inactive_since) >= 1.0)
         self._active_since = None
         self._inactive_since = None
@@ -278,8 +282,9 @@ class CommandEngine:
 
     @property
     def busy(self) -> bool:
-        """A command hold is PAST ITS ARM TIME: the cursor engine should stand
-        down so the pose that forms the command cannot also steer the pointer.
+        """A CURSOR-HAND command hold is PAST ITS ARM TIME: the cursor engine
+        should stand down so the pose that forms the command cannot also steer
+        the pointer.
 
         Gated on progress, not on `armed` — armed is true from the very first
         pattern-matching frame, and the CLI answers `busy` by feeding the
@@ -288,10 +293,15 @@ class CommandEngine:
         into a palm) pattern-match command poses for a frame or two, and each
         one blanked the cursor mid-gesture. The arm dwell exists precisely to
         absorb those frames; busy must wait for it too.
+
+        Free-hand holds (copy/paste/enter) are excluded: the cursor engine
+        never reads that hand, so blanking it protects nothing — it only
+        force-releases an in-progress drag on the cursor hand. Pane stays:
+        two-handed, it includes the cursor hand.
         """
         return any(h.progress(self._now) > 0.0
                    for h in (self.pane, self.mission, self.toggle,
-                             self.dictate, self.copy, self.paste, self.enter))
+                             self.dictate))
 
     @property
     def overlay(self) -> dict:
@@ -345,9 +355,15 @@ class CommandEngine:
                                  self._fist_shadow_until)
         fist_shadow = now < self._fist_shadow_until
 
-        # TOGGLE listens even while disabled — it is the way back in.
-        ily = mine is not None and is_ily_pose(mine)
-        if self.toggle.update(ily, now):
+        # TOGGLE listens even while disabled — it is the way back in. While
+        # enabled it respects the pinch shadow like the other cursor-hand
+        # holds: a held click-pinch sheds ILY-shaped misread frames (middle +
+        # ring stay curled, refreshing the shadow), and the pause arming
+        # mid-drag blanks the cursor engine via `busy` and drops the drag.
+        # Disabled needs no gate — there is nothing held to protect.
+        ily = (mine is not None and is_ily_pose(mine)
+               and (not self.enabled or not pinch_shadow))
+        if self.toggle.update(ily, now, present=mine is not None):
             self.enabled = not self.enabled
             self._emit(Command.TOGGLE, enabled=self.enabled)
 
@@ -368,11 +384,12 @@ class CommandEngine:
 
         # NEW_PANE: both hands in the L-pose. The rect is captured live so the
         # release commits what the preview showed, not a post-release slump.
-        framing = (snap.left is not None and snap.right is not None
-                   and is_frame_pose(snap.left) and is_frame_pose(snap.right))
+        both = snap.left is not None and snap.right is not None
+        framing = (both and is_frame_pose(snap.left)
+                   and is_frame_pose(snap.right))
         if framing:
             self._rect = frame_rect(snap.left, snap.right)
-        if self.pane.update(framing, now):
+        if self.pane.update(framing, now, present=both):
             self._emit(Command.NEW_PANE, rect=self._rect)
         if not framing and not self.pane.armed:
             self._rect = None
@@ -381,7 +398,7 @@ class CommandEngine:
         # shadow of a click-pinch it could be opening out of.
         ok = (not framing and not pinch_shadow and mine is not None
               and is_ok_pose(mine, self.pinch_on_mm))
-        if self.mission.update(ok, now):
+        if self.mission.update(ok, now, present=mine is not None):
             self._emit(Command.MISSION_CONTROL)
 
         # DICTATE: thumbs-up on the cursor hand, a TOGGLE. One short
@@ -391,7 +408,7 @@ class CommandEngine:
         # The driver holds the dictation hotkey while _dictating is true.
         thumb = (not framing and not fist_shadow and mine is not None
                  and is_thumbs_up(mine))
-        if self.dictate.update(thumb, now):
+        if self.dictate.update(thumb, now, present=mine is not None):
             self._dictating = not self._dictating
             self._emit(Command.DICTATE, active=self._dictating)
 
@@ -399,11 +416,11 @@ class CommandEngine:
         other = snap.left if self.hand == "Right" else snap.right
         copying = (not framing and other is not None
                    and is_pinch_hold(other, self.pinch_on_mm))
-        if self.copy.update(copying, now):
+        if self.copy.update(copying, now, present=other is not None):
             self._emit(Command.COPY)
         pasting = (not framing and other is not None and is_v_pose(other))
-        if self.paste.update(pasting, now):
+        if self.paste.update(pasting, now, present=other is not None):
             self._emit(Command.PASTE)
         entering = (not framing and other is not None and is_ily_pose(other))
-        if self.enter.update(entering, now):
+        if self.enter.update(entering, now, present=other is not None):
             self._emit(Command.ENTER)

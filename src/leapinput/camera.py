@@ -27,6 +27,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import math
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -72,6 +73,25 @@ PLANE_Y_BASE = 200.0               # bottom of image = 200mm
 # than allowed to grab the cursor. (The idea a full Depth Anything integration
 # would buy, at zero model cost; see TouchDesigner's TDDepthAnything.)
 MIN_SPAN_IMG = 0.04
+
+# The reach box must never sit flush against the camera frame boundary:
+# reaching the box edge would then demand knuckles AT the image border, where
+# the fingers are already out of frame and MediaPipe extrapolates (2026-08-19
+# telemetry: 255 right-edge samples with the box pinned at x1=1.0, garbage
+# finger states and a frozen-landmark run all clustered there, and the cursor
+# topping out ~14px short of the screen edge). With this margin the screen
+# edge maps to a hand position that is still fully trackable.
+FRAME_EDGE_MARGIN = 0.04
+
+
+def _clamp_box_origin(v: float, size: float,
+                      margin: float = FRAME_EDGE_MARGIN) -> float:
+    """Clamp a box origin so the box keeps `margin` clear of the frame edge
+    (falling back to the plain [0,1] clamp when the box is too wide for it)."""
+    lo, hi = margin, 1.0 - margin - size
+    if hi < lo:
+        lo, hi = 0.0, max(0.0, 1.0 - size)
+    return min(max(v, lo), hi)
 
 # pinch_strength synthesised from thumb-index tip distance (world landmarks, mm).
 # Anchored to gestures.Config: at pinch_on_mm (50) this yields 0.6, clearing
@@ -151,6 +171,16 @@ class Tuning:
     # stable within an engagement. "fixed": the exact rectangle reach
     # corners/map placed, where it placed it.
     reach_center: str = "palm"
+    # Comfort inset (2026-08-19, edge-reach research): shrink the DYNAMIC
+    # palm box by this fraction per side, so the box maps to MORE than the
+    # screen — the cursor reaches the screen edge while the hand is still
+    # comfortably inside the box, instead of exactly at its boundary (where
+    # the drag-along slide and the edge noise-ratchet live). The webcam-mouse
+    # classic (frameR: 16-21% of the frame per side) and Kinect's ergonomic
+    # PhIZ, scaled down to 10% because the fitted box is already a comfort
+    # fit. Effective zoom rises by 1/(1-2*inset) — tune_for_camera folds that
+    # into the noise-anchored knobs so the jitter budget holds.
+    reach_inset: float = 0.10
     # Your hand as the calibration target — the ChArUco-board idea, with the
     # hand as the board: a rigid object of known physical size present in
     # every frame, converting image measurements to metric. This is the REAL
@@ -186,6 +216,11 @@ class Tuning:
         """How much the reach box magnifies motion per axis (1.0 = whole frame)."""
         x0, y0, x1, y1 = self.reach
         return (1.0 / (x1 - x0), 1.0 / (y1 - y0))
+
+    @property
+    def inset_scale(self) -> float:
+        """Dynamic-box shrink factor from reach_inset, clamped to stay sane."""
+        return 1.0 - 2.0 * max(0.0, min(0.35, self.reach_inset))
 
     @property
     def reach_active(self) -> bool:
@@ -554,6 +589,12 @@ def tune_for_camera(gesture_cfg, mapping, tuning: Optional[Tuning] = None) -> No
     # Calibrated (or default) pinch band, in the camera's span-normalized mm.
     gesture_cfg.pinch_on_mm = tuning.pinch_on_mm
     gesture_cfg.pinch_off_mm = tuning.pinch_off_mm
+    # Deep-commit: fire 10mm below the calibrated arm threshold. The 2026-08-19
+    # live telemetry showed the relaxed-point rest band drifting through
+    # pinch_on (phantom clicks bottoming at 28-34mm vs deliberate pinches at
+    # <=25.6mm); the ramp arms at on+8, freezes at on, and now commits at
+    # on-10 — the whole extra descent happens on a frozen cursor.
+    gesture_cfg.pinch_commit_mm = max(15.0, tuning.pinch_on_mm - 10.0)
     # Freeze completes AT the firing threshold (see gestures.Config): the ramp
     # spans the last 8mm of approach and reaches 0.0 exactly when the Schmitt
     # can fire, so the click posts on a stopped cursor — never after it.
@@ -582,7 +623,10 @@ def tune_for_camera(gesture_cfg, mapping, tuning: Optional[Tuning] = None) -> No
     # deadzone and the slow/fast gain profile anchored to the PHYSICAL hand,
     # which leaves exactly one intended effect: zoom x more cursor per reach.
     zx, zy = tuning.reach_zoom
-    zoom = math.sqrt(zx * zy)
+    # The comfort inset shrinks the dynamic box below the stored one, so the
+    # effective zoom is higher by 1/inset_scale — fold it in, or every
+    # noise-anchored knob below re-anchors ~25% low.
+    zoom = math.sqrt(zx * zy) / tuning.inset_scale
     # NOTE: this is the STORED box's zoom; the dynamic palm box re-sizes with
     # apparent hand span per engagement (down to a 1/6-frame floor), so these
     # compensations are anchored to the calibrated working distance and drift
@@ -741,6 +785,11 @@ class CameraSource:
         # when the hand (re)appears, held while it stays tracked, dropped with
         # the hand. Written by the capture thread; read by preview/test views.
         self._reach_now: dict[str, Optional[tuple]] = {"Left": None, "Right": None}
+        # The most recently EXPIRED box per side, as (box, now_us at expiry).
+        # A dropout past the flicker hold clears _reach_now, but if the same
+        # hand comes back quickly near where it vanished, re-centring would
+        # teleport the cursor — _resolve_reach revives this box instead.
+        self._reach_gone: dict[str, Optional[tuple]] = {"Left": None, "Right": None}
         self._frame_id = 0
         # Pipeline health, written by the capture thread: measured camera fps,
         # EMA of detection time, and whether detection kept up with the camera
@@ -771,7 +820,8 @@ class CameraSource:
         return self.FRAME_ASPECT / self._screen_aspect
 
     def _resolve_reach(self, side: str, img_lms,
-                       sig: Optional[PoseSignals] = None
+                       sig: Optional[PoseSignals] = None,
+                       now_us: int = 0
                        ) -> tuple[float, float, float, float]:
         """Palm mode: the box is a TOUCHSCREEN SHEET under the hand.
 
@@ -795,18 +845,37 @@ class CameraSource:
         cy = sum(img_lms[i].y for i in MCPS) / len(MCPS)
         box = self._reach_now.get(side)
         if self._prev.get(side) is None or box is None:
+            # A dropout past the flicker hold expired the box, but a quick
+            # reappearance near where the hand vanished is the SAME reach,
+            # not a new one — revive the dying box so the cursor stays aimed
+            # instead of teleporting to the recentred box's middle. Same
+            # continuity window lone_hand_side uses; the 0.05 margin per
+            # side forgives detector wobble at reappearance.
+            box = None
+            gone = self._reach_gone.get(side)
+            if gone is not None:
+                (gx0, gy0, gx1, gy1), expired_at = gone
+                if (now_us - expired_at < 500_000
+                        and gx0 - 0.05 <= cx <= gx1 + 0.05
+                        and gy0 - 0.05 <= cy <= gy1 + 0.05):
+                    box = (gx0, gy0, gx1, gy1)
+        self._reach_gone[side] = None
+        if box is None:
             x0, y0, x1, y1 = t.reach
             w = x1 - x0
             if (sig is not None and sig.span_img and t.ref_span_img > 0.0):
                 w *= max(0.5, min(3.0, sig.span_img / t.ref_span_img))
+            # Comfort inset: the box maps to MORE than the screen, so edges
+            # land inside the comfortable envelope (see Tuning.reach_inset).
+            w *= t.inset_scale
             # Floor at ~6x zoom, looser than the stored-box 4x cap: a distant
             # hand NEEDS the shrink to keep its physical sensitivity, and the
             # precision cost out there is the honest price of sitting far
             # from the camera, not a reason to silently slow the cursor.
             w = max(1.0 / 6.0, min(1.0, w))
             h = min(1.0, w * self.dyn_h_per_w)
-            nx0 = min(max(cx - w / 2.0, 0.0), 1.0 - w)
-            ny0 = min(max(cy - h / 2.0, 0.0), 1.0 - h)
+            nx0 = _clamp_box_origin(cx - w / 2.0, w)
+            ny0 = _clamp_box_origin(cy - h / 2.0, h)
             box = (nx0, ny0, nx0 + w, ny0 + h)
         else:
             x0, y0, x1, y1 = box
@@ -814,8 +883,8 @@ class CameraSource:
             dy = (cy - y1) if cy > y1 else (cy - y0) if cy < y0 else 0.0
             if dx or dy:
                 w, h = x1 - x0, y1 - y0
-                nx0 = min(max(x0 + dx, 0.0), 1.0 - w)
-                ny0 = min(max(y0 + dy, 0.0), 1.0 - h)
+                nx0 = _clamp_box_origin(x0 + dx, w)
+                ny0 = _clamp_box_origin(y0 + dy, h)
                 box = (nx0, ny0, nx0 + w, ny0 + h)
         self._reach_now[side] = box
         return box
@@ -882,10 +951,41 @@ class CameraSource:
         return cap
 
     def _run(self, cv2, mp, cap, landmarker) -> None:
+        # However this thread ends — clean stop, racing close(), or a crash in
+        # detection or a subscriber — held input must not stay held: the empty
+        # Snapshot is the engine's only release path (gestures' frame-None
+        # branch), and nothing else sends one while the process lives. The
+        # final dispatch is idempotent (a released engine emits nothing) and
+        # each subscriber is guarded individually, so the one that crashed
+        # cannot block the others' release. The exception still propagates so
+        # the traceback reaches stderr.
+        try:
+            self._run_loop(cv2, mp, cap, landmarker)
+        finally:
+            if not self._stop.is_set():
+                print("camera capture thread exiting — releasing held input",
+                      file=sys.stderr)
+            for side in ("Left", "Right"):
+                self._prev[side] = None
+                self.latest_signals[side] = None
+                self._reach_now[side] = None
+            snap = Snapshot()
+            with self._lock:
+                self.latest = snap
+                self.frames += 1
+            for fn in self._subscribers:
+                try:
+                    fn(snap)
+                except Exception:
+                    pass
+
+    def _run_loop(self, cv2, mp, cap, landmarker) -> None:
         set_thread_qos_user_interactive()
         last_ms = 0
         frame_budget_us = None          # measured from the frame cadence below
         prev_capture_us = None
+        stall_start_us = None           # first failed read of the current stall
+        stalled = False                 # stall release already dispatched
         while not self._stop.is_set():
             # Detection slower than the camera means frames queue and every
             # snapshot describes the past. Drain the stalest buffered frame
@@ -899,8 +999,41 @@ class CameraSource:
             # this thread took to get around to it.
             now_us = time.monotonic_ns() // 1_000
             if not ok:
+                # Mid-session stream loss (camera unplugged, phone stream
+                # stopped) never reaches the flicker-hold below — it sits
+                # after this continue — so a held pinch would stay held for
+                # as long as the stall lasts. Once failed reads outlast the
+                # same 150ms budget, release everything ONCE, then keep
+                # retrying reads; dispatch resumes with the frames.
+                if stall_start_us is None:
+                    stall_start_us = now_us
+                elif not stalled and now_us - stall_start_us >= 150_000:
+                    stalled = True
+                    # Only when there is anything to release: the phone source
+                    # legitimately idles here before its stream starts, where
+                    # nothing can be held yet — releasing would be pure noise,
+                    # and the empty dispatch would bump `frames` and trick the
+                    # CLI's stall watch into a spurious release of its own.
+                    if (prev_capture_us is not None
+                            or any(self._prev.values())
+                            or any(self._reach_now.values())):
+                        print("camera stopped delivering frames — releasing "
+                              "held input", file=sys.stderr)
+                        for side in ("Left", "Right"):
+                            self._prev[side] = None
+                            self.latest_signals[side] = None
+                            # Stash the dying box: a brief stream hiccup
+                            # should not cost the hand its aim (same revival
+                            # window).
+                            if self._reach_now[side] is not None:
+                                self._reach_gone[side] = (
+                                    self._reach_now[side], now_us)
+                            self._reach_now[side] = None
+                        self._dispatch(Snapshot())
                 time.sleep(0.05)
                 continue
+            stall_start_us = None
+            stalled = False
             if prev_capture_us is not None:
                 interval = now_us - prev_capture_us
                 fps = self.stats["fps"]
@@ -967,7 +1100,7 @@ class CameraSource:
                                      now_us, prev=self._prev.get(side),
                                      tuning=self._tuning, signals=sig,
                                      reach=self._resolve_reach(side, img_lms,
-                                                               sig))
+                                                               sig, now_us))
                 self._prev[side] = frame
                 self._last_wrist[side] = (img_lms[0].x, img_lms[0].y, now_us)
                 self.latest_signals[side] = sig
@@ -994,7 +1127,12 @@ class CameraSource:
                     else:
                         self._prev[side] = None
                         self.latest_signals[side] = None
-                        # Hand genuinely gone: the next appearance re-centres.
+                        # Hand genuinely gone: the next appearance re-centres —
+                        # unless it is quick and nearby, so stash the dying box
+                        # for _resolve_reach's revival check.
+                        if self._reach_now[side] is not None:
+                            self._reach_gone[side] = (self._reach_now[side],
+                                                      now_us)
                         self._reach_now[side] = None
             if self._preview:
                 self._annotate(cv2, bgr, result, snap)

@@ -5,6 +5,7 @@ second monitor to show up.
 """
 
 import dataclasses
+import math
 
 from leapinput.actions import DryRunBackend
 from leapinput.capture import HandFrame, Vec3
@@ -375,6 +376,91 @@ def test_a_stale_anchor_is_ignored():
         "a 1.5s-old anchor must not warp the click"
 
 
+def test_fist_drag_consumes_the_pinch_anchor():
+    """A pinch-to-fist handover is silent (no select.up), so a fist-drag used
+    to leave the pre-drag anchor alive and warp the NEXT pinch-click back to
+    where the hand was aiming before the drag."""
+    driver, _ = make()
+    driver.on_intent(IntentEvent(Intent.CLUTCH_DOWN, 0.0, frame(0, 150, 0, 0)))
+    # Pinch starts forming: anchor armed at the pre-drag position.
+    driver.on_intent(IntentEvent(Intent.POINT_MOVE, 0.01,
+                                 frame(0, 150, 0, 10_000), {"settle": 0.5}))
+    pre_drag = (driver.x, driver.y)
+    driver.on_intent(IntentEvent(Intent.SELECT_DOWN, 0.02, frame(0, 150, 0, 20_000)))
+    driver.on_intent(IntentEvent(Intent.GRAB_DOWN, 0.03, frame(0, 150, 0, 30_000)))
+    # A quick short drag: real travel (past CLICK_TRAVEL_PX, so the up is not
+    # pinned back) but ending inside the anchor trust bounds, where the stale
+    # warp would fire.
+    for i in range(1, 9):
+        driver.on_intent(IntentEvent(Intent.POINT_MOVE, 0.03 + i * 0.033,
+                                     frame(i * 4.0, 150, 0, 30_000 + i * 33_000),
+                                     {"settle": 1.0}))
+    driver.on_intent(IntentEvent(Intent.GRAB_UP, 0.32, frame(32.0, 150, 0, 320_000)))
+    dropped = (driver.x, driver.y)
+    drift = math.hypot(dropped[0] - pre_drag[0], dropped[1] - pre_drag[1])
+    assert DirectDriver.CLICK_TRAVEL_PX < drift < DirectDriver.ANCHOR_MAX_DIST_PX, \
+        "test needs the drop point inside the anchor trust bounds"
+    # Fresh pinch right where the drag ended; the pinch never fully reopened,
+    # so no settle >= 1.0 frame ever cleared the old anchor.
+    driver.on_intent(IntentEvent(Intent.POINT_MOVE, 0.37,
+                                 frame(32.0, 150, 0, 370_000), {"settle": 0.5}))
+    driver.on_intent(IntentEvent(Intent.SELECT_DOWN, 0.42,
+                                 frame(32.0, 150, 0, 420_000)))
+    assert (driver.x, driver.y) == dropped, \
+        "next pinch-click warped back to the pre-drag anchor"
+
+
+def test_fist_click_warps_to_the_anchor_like_a_pinch():
+    """grab.down is the same commit as select.down and deserves the same
+    Heisenberg correction: a fresh fist warps back to where the hand was
+    aiming before the closing fingers dragged the cursor off it."""
+    driver, _ = make()
+    driver.on_intent(IntentEvent(Intent.CLUTCH_DOWN, 0.0, frame(0, 150, 0, 0)))
+    driver.on_intent(IntentEvent(Intent.POINT_MOVE, 0.01,
+                                 frame(0, 150, 0, 10_000), {"settle": 0.5}))
+    anchored = (driver.x, driver.y)
+    for i in range(1, 6):
+        driver.on_intent(IntentEvent(Intent.POINT_MOVE, 0.01 + i * 0.033,
+                                     frame(i * 1.5, 150, 0, 10_000 + i * 33_000),
+                                     {"settle": 0.5}))
+    assert (driver.x, driver.y) != anchored
+    driver.on_intent(IntentEvent(Intent.GRAB_DOWN, 0.25,
+                                 frame(7.5, 150, 0, 250_000)))
+    assert (driver.x, driver.y) == anchored, \
+        "a fresh fist-click did not get the anchor warp a pinch-click gets"
+
+
+def test_grab_down_mid_drag_never_warps_a_live_drag():
+    """The pinch-into-fist handover emits grab.down while the button is already
+    held (no select.up in between): even a fresh, nearby anchor must not
+    teleport the drag back to where the click started."""
+    driver, _ = make()
+    driver.on_intent(IntentEvent(Intent.CLUTCH_DOWN, 0.0, frame(0, 150, 0, 0)))
+    driver.on_intent(IntentEvent(Intent.SELECT_DOWN, 0.02, frame(0, 150, 0, 20_000)))
+    for i in range(1, 15):
+        driver.on_intent(IntentEvent(Intent.POINT_MOVE, 0.02 + i * 0.033,
+                                     frame(i * 4.0, 150, 0, 20_000 + i * 33_000),
+                                     {"settle": 1.0}))
+    dragged = (driver.x, driver.y)
+    # Force the hostile case: an anchor that is fresh and inside the trust
+    # bounds at handover time. An unguarded warp would consume it.
+    driver._click_anchor = (dragged[0] - 20.0, dragged[1], 0.5)
+    driver.on_intent(IntentEvent(Intent.GRAB_DOWN, 0.52,
+                                 frame(56.0, 150, 0, 520_000)))
+    assert (driver.x, driver.y) == dragged, \
+        "grab.down handover teleported a live drag back to the click anchor"
+
+
+def test_grab_up_clears_the_click_anchor():
+    """Defensive parity with select.up: no anchor survives a grab cycle."""
+    driver, _ = make()
+    driver.on_intent(IntentEvent(Intent.CLUTCH_DOWN, 0.0, frame(0, 150, 0, 0)))
+    driver.on_intent(IntentEvent(Intent.GRAB_DOWN, 0.02, frame(0, 150, 0, 20_000)))
+    driver._click_anchor = (driver.x, driver.y, 0.03)   # hostile: re-armed mid-hold
+    driver.on_intent(IntentEvent(Intent.GRAB_UP, 0.05, frame(0, 150, 0, 50_000)))
+    assert driver._click_anchor is None
+
+
 def test_click_up_lands_on_the_down_pixel():
     """macOS resolves the click on mouse-up; a click (not a drag) must post
     down and up on the same pixel even if the opening pinch drifts a few px."""
@@ -390,6 +476,73 @@ def test_click_up_lands_on_the_down_pixel():
     driver.on_intent(IntentEvent(Intent.SELECT_UP, 0.1, frame(1.6, 150, 0, 100_000)))
     assert (driver.x, driver.y) == down_xy
     assert backend.calls[-2:] == [("move", *down_xy), ("up", *down_xy)]
+
+
+# --- touch-mode click anchor (2026-08-19) ------------------------------------
+
+def abs_frame(px, py, t_us) -> HandFrame:
+    """A frame whose index tip sits at plane-mm (px, py) — the coordinates
+    _move_absolute reads in the xy plane."""
+    return frame(px + 6.0, py - 30.0, 0.0, t_us)
+
+
+def test_absolute_click_stays_pinned_after_anchor_warp():
+    """Touch mode: the anchor warp at select.down moves the cursor off the LIVE
+    hand target, and the next full-settle frame used to lerp straight back —
+    the snap accrued into _travel, the <12px pin-back refused, and mouse-up
+    posted away from mouse-down: a corrected click became an accidental drag.
+    The commit position must hold for the whole button hold."""
+    driver, backend = make(Mapping(plane="xy", absolute=True,
+                                   pointer_min_cutoff=1000.0),  # ~transparent
+                           bounds=(0.0, 0.0, 1512.0, 982.0))
+    driver.on_intent(IntentEvent(Intent.CLUTCH_DOWN, 0.0, abs_frame(0, 260, 0)))
+    driver.on_intent(IntentEvent(Intent.POINT_MOVE, 0.01,
+                                 abs_frame(0, 260, 10_000), {"settle": 1.0}))
+    aim = (driver.x, driver.y)
+    # The closing pinch drags the hand ~47px of target while settle holds the
+    # cursor back; the anchor is armed at the aim point on the first frame.
+    for i in range(1, 6):
+        driver.on_intent(IntentEvent(Intent.POINT_MOVE, 0.01 + i * 0.033,
+                                     abs_frame(i * 2.0, 260, 10_000 + i * 33_000),
+                                     {"settle": 0.5}))
+    assert (driver.x, driver.y) != aim
+    driver.on_intent(IntentEvent(Intent.SELECT_DOWN, 0.2,
+                                 abs_frame(10.0, 260, 200_000)))
+    assert (driver.x, driver.y) == aim          # warped back to the aim point
+    # Pinch fully formed: a full-settle frame arrives with the hand still
+    # displaced. The cursor must stay pinned at the warp position...
+    driver.on_intent(IntentEvent(Intent.POINT_MOVE, 0.23,
+                                 abs_frame(10.0, 260, 230_000), {"settle": 1.0}))
+    assert (driver.x, driver.y) == aim, \
+        "full-settle frame lerped the held click back to the live hand target"
+    # ...and the click-up must land on the down pixel.
+    driver.on_intent(IntentEvent(Intent.SELECT_UP, 0.3,
+                                 abs_frame(10.0, 260, 300_000)))
+    down = next(c for c in backend.calls if c[0] == "down")
+    assert backend.calls[-1] == ("up", *down[1:])
+    assert (driver.x, driver.y) == aim
+
+
+def test_absolute_cursor_snaps_to_live_target_after_the_click():
+    """The touch offset dies with the button: once the click completes, the
+    next full-settle frame follows the live hand again."""
+    driver, _ = make(Mapping(plane="xy", absolute=True,
+                             pointer_min_cutoff=1000.0),
+                     bounds=(0.0, 0.0, 1512.0, 982.0))
+    driver.on_intent(IntentEvent(Intent.CLUTCH_DOWN, 0.0, abs_frame(0, 260, 0)))
+    driver.on_intent(IntentEvent(Intent.POINT_MOVE, 0.01,
+                                 abs_frame(0, 260, 10_000), {"settle": 1.0}))
+    aim = (driver.x, driver.y)
+    driver.on_intent(IntentEvent(Intent.POINT_MOVE, 0.04,
+                                 abs_frame(2.0, 260, 40_000), {"settle": 0.5}))
+    driver.on_intent(IntentEvent(Intent.SELECT_DOWN, 0.07,
+                                 abs_frame(2.0, 260, 70_000)))
+    driver.on_intent(IntentEvent(Intent.SELECT_UP, 0.12,
+                                 abs_frame(2.0, 260, 120_000)))
+    assert (driver.x, driver.y) == aim          # click pinned to the aim point
+    driver.on_intent(IntentEvent(Intent.POINT_MOVE, 0.15,
+                                 abs_frame(40.0, 260, 150_000), {"settle": 1.0}))
+    assert (driver.x, driver.y) != aim, "offset survived the click"
 
 
 def test_a_drag_release_stays_where_it_was_dragged():
@@ -531,6 +684,47 @@ def test_dictate_edges_are_idempotent():
     assert [h[2] for h in holds] == [True, False]
 
 
+def test_watchdog_fire_invokes_forced_release_callback():
+    """A watchdog force-release must tell the state-tracking layer (the CLI's
+    snapshot gate), or its next chime plays inverted."""
+    sd, backend = _shortcut_driver()
+    fired = []
+    sd.on_forced_release = lambda: fired.append(True)
+    sd.on_command(_cmd("dictate", active=True))
+    sd._dictation_watchdog()                    # fire the timer body directly
+    assert fired == [True]
+    holds = [c for c in backend.calls if c[0] == "key_hold"]
+    assert [h[2] for h in holds] == [True, False]
+
+
+def test_normal_toggle_off_does_not_invoke_forced_release():
+    sd, _ = _shortcut_driver()
+    fired = []
+    sd.on_forced_release = lambda: fired.append(True)
+    sd.on_command(_cmd("dictate", active=True))
+    sd.on_command(_cmd("dictate", active=False))
+    assert fired == []
+    # And a watchdog that lost the race to the stop edge stays quiet too:
+    # nothing was actually released, so nothing must be reported.
+    sd._dictation_watchdog()
+    assert fired == []
+
+
+def test_forced_release_callback_errors_do_not_propagate(capsys):
+    """The callback runs on the Timer thread; an error there must not kill it
+    (Option is already released by then — cleanup must finish quietly)."""
+    def boom():
+        raise RuntimeError("chime desync")
+
+    sd, backend = _shortcut_driver()
+    sd.on_forced_release = boom
+    sd.on_command(_cmd("dictate", active=True))
+    sd._dictation_watchdog()                    # must not raise
+    holds = [c for c in backend.calls if c[0] == "key_hold"]
+    assert [h[2] for h in holds] == [True, False]
+    assert "on_forced_release failed" in capsys.readouterr().err
+
+
 def test_copy_paste_press_cmd_c_and_v():
     sd, backend = _shortcut_driver()
     sd.on_command(_cmd("copy"))
@@ -544,3 +738,59 @@ def test_enter_taps_return():
     sd, backend = _shortcut_driver()
     sd.on_command(_cmd("enter"))
     assert ("key", sd.KEY_RETURN, {}) in backend.calls
+
+
+def _drive_abs(mapping, step, frames=10):
+    """CLUTCH_DOWN then full-settle POINT_MOVEs advancing `step` plane-mm per
+    33ms frame; returns cursor travel in px."""
+    driver, _ = make(mapping, bounds=(0.0, 0.0, 1512.0, 982.0))
+    driver.on_intent(IntentEvent(Intent.CLUTCH_DOWN, 0.0, abs_frame(50, 260, 0)))
+    driver.on_intent(IntentEvent(Intent.POINT_MOVE, 0.01,
+                                 abs_frame(50, 260, 10_000), {"settle": 1.0}))
+    x0 = driver.x
+    for i in range(1, frames + 1):
+        driver.on_intent(IntentEvent(Intent.POINT_MOVE, 0.01 + i * 0.033,
+                                     abs_frame(50 + i * step, 260,
+                                               10_000 + i * 33_000),
+                                     {"settle": 1.0}))
+    return driver, driver.x - x0
+
+
+def test_touch_precision_scales_slow_motion_down():
+    """Slow hand = small target (PRISM): the same slow crawl must travel a
+    precision fraction of its 1:1 distance."""
+    plain = Mapping(plane="xy", absolute=True, pointer_min_cutoff=1000.0,
+                    precision_gain_min=1.0)          # layer off
+    prec = Mapping(plane="xy", absolute=True, pointer_min_cutoff=1000.0)
+    _, moved_plain = _drive_abs(plain, step=1.0)     # ~140 px/s: aiming speed
+    _, moved_prec = _drive_abs(prec, step=1.0)
+    assert moved_plain > 0
+    assert moved_prec < 0.6 * moved_plain
+    assert moved_prec > 0.15 * moved_plain           # scaled, not frozen
+
+
+def test_touch_precision_is_transparent_at_speed():
+    """Ballistic motion stays position-faithful: 1:1 within the deadband."""
+    plain = Mapping(plane="xy", absolute=True, pointer_min_cutoff=1000.0,
+                    precision_gain_min=1.0)
+    prec = Mapping(plane="xy", absolute=True, pointer_min_cutoff=1000.0)
+    _, moved_plain = _drive_abs(plain, step=25.0)    # ~3500 px/s: a flick
+    _, moved_prec = _drive_abs(prec, step=25.0)
+    assert abs(moved_prec - moved_plain) < 3.0
+
+
+def test_touch_precision_offset_is_bounded_and_bleeds_at_speed():
+    prec = Mapping(plane="xy", absolute=True, pointer_min_cutoff=1000.0)
+    driver, _ = _drive_abs(prec, step=1.0, frames=60)   # long slow crawl
+    off = math.hypot(*driver._prec_off)
+    assert off <= prec.precision_offset_max_px + 1e-6
+    assert off > 5.0                                    # it did accumulate
+    t0 = 10_000 + 61 * 33_000
+    for i in range(30):                                 # now flick around
+        # Alternate INSIDE the plane range: a clamped-out-of-range target
+        # reads as zero motion and would never register as speed.
+        driver.on_intent(IntentEvent(Intent.POINT_MOVE, 3.0 + i * 0.033,
+                                     abs_frame(60.0 + (i % 2) * 60.0, 260,
+                                               t0 + i * 33_000),
+                                     {"settle": 1.0}))
+    assert math.hypot(*driver._prec_off) < off * 0.3    # bled away

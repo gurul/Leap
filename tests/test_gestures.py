@@ -51,6 +51,39 @@ def drive(engine: GestureEngine, frames) -> list[Intent]:
     return [i for i in seen if i is not Intent.POINT_MOVE]
 
 
+# --- deep-commit gate (phantom clicks, 2026-08-19) --------------------------
+
+def _commit_cfg(commit):
+    cfg = Config(plane="xz", clutch_mode="palm", engage_dwell=0.0,
+                 pinch_dwell=0.0, clutch_dwell=0.0)
+    cfg.pinch_commit_mm = commit
+    return cfg
+
+
+def test_rest_band_drift_below_pinch_on_never_clicks():
+    """The relaxed-point rest band drifts through pinch_on (live telemetry:
+    phantoms bottomed at 28-34mm); with a commit gate set, crossing pinch_on
+    without reaching commit depth must never fire."""
+    eng = GestureEngine(_commit_cfg(40.0))
+    frames = ([frame(pinch_distance=80.0)] * 5
+              + [frame(pinch_distance=45.0, pinch_strength=1.0)] * 30)
+    assert Intent.SELECT_DOWN not in drive(eng, frames)
+
+
+def test_contact_depth_pinch_still_clicks_through_the_commit_gate():
+    eng = GestureEngine(_commit_cfg(40.0))
+    frames = ([frame(pinch_distance=80.0)] * 5
+              + [frame(pinch_distance=35.0, pinch_strength=1.0)] * 30)
+    assert Intent.SELECT_DOWN in drive(eng, frames)
+
+
+def test_no_commit_gate_keeps_the_leap_fire_threshold():
+    eng = GestureEngine(_commit_cfg(None))  # None = fire at pinch_on, as ever
+    frames = ([frame(pinch_distance=80.0)] * 5
+              + [frame(pinch_distance=45.0, pinch_strength=1.0)] * 30)
+    assert Intent.SELECT_DOWN in drive(eng, frames)
+
+
 # --- Schmitt trigger --------------------------------------------------------
 
 def test_schmitt_high_signal_latches_and_releases():
@@ -409,6 +442,70 @@ def test_a_single_dropped_frame_does_not_flip_state():
         engine.on_snapshot(Snapshot(right=frame(
             timestamp=t, extended=tuple(k < n for k in range(5)))))
     assert Intent.CLUTCH_UP not in seen
+
+
+def _feed_count(engine, t, n, grab=0.0, frames=40):
+    """Drive one extended-finger count long enough to clear every debounce."""
+    for _ in range(frames):
+        t += 9000
+        engine.on_snapshot(Snapshot(right=frame(
+            timestamp=t, extended=tuple(k < n for k in range(5)),
+            grab_strength=grab)))
+    return t
+
+
+def test_tracking_loss_resets_the_finger_ladder():
+    """A fist latched before tracking loss must not survive it. Reproduced
+    live: fist-drag, loss, reappear pointing fired engage/clutch.down/
+    grab.down/grab.up — a phantom mouse click at the parked cursor. The
+    reappearing hand must re-earn its count through the finger_hold debounce."""
+    engine = GestureEngine(cfg_fingers())
+    seen = []
+    engine.subscribe(lambda e: seen.append(e.intent))
+    t = _feed_count(engine, 0, 0, grab=0.95)       # fist-drag latches
+    assert Intent.GRAB_DOWN in seen
+    for _ in range(5):
+        engine.on_snapshot(Snapshot())             # tracking lost
+    assert Intent.GRAB_UP in seen and Intent.DISENGAGE in seen
+    seen.clear()
+    _feed_count(engine, t, 1)                      # reappear pointing
+    filtered = [i for i in seen if i is not Intent.POINT_MOVE]
+    assert filtered == [Intent.ENGAGE, Intent.CLUTCH_DOWN]
+
+
+def test_reappearing_open_hand_stays_lifted():
+    """The other half of the phantom: a fist surviving the loss made an OPEN
+    reappearing hand cycle the clutch (a short phantom drag). Fresh-engine
+    behavior is engage only."""
+    engine = GestureEngine(cfg_fingers())
+    seen = []
+    engine.subscribe(lambda e: seen.append(e.intent))
+    t = _feed_count(engine, 0, 0, grab=0.95)
+    for _ in range(5):
+        engine.on_snapshot(Snapshot())
+    seen.clear()
+    _feed_count(engine, t, 5)                      # reappear open
+    filtered = [i for i in seen if i is not Intent.POINT_MOVE]
+    assert filtered == [Intent.ENGAGE]
+
+
+def test_height_disengage_resets_the_finger_ladder():
+    """Dropping below the release height is the same trust boundary as loss:
+    a fist latched before the drop must not be believed on re-engage."""
+    engine = GestureEngine(cfg_fingers())
+    seen = []
+    engine.subscribe(lambda e: seen.append(e.intent))
+    t = _feed_count(engine, 0, 0, grab=0.95)       # fist-drag latches
+    for _ in range(5):                             # hand drops out of the box
+        t += 9000
+        engine.on_snapshot(Snapshot(right=frame(
+            timestamp=t, palm=Vec3(0, 40, 0), extended=(False,) * 5,
+            grab_strength=0.95)))
+    assert Intent.DISENGAGE in seen
+    seen.clear()
+    _feed_count(engine, t, 1)                      # re-engage pointing
+    filtered = [i for i in seen if i is not Intent.POINT_MOVE]
+    assert filtered == [Intent.ENGAGE, Intent.CLUTCH_DOWN]
 
 
 # --- settle latch: drags must move (plan item 1, 2026-08-18) -----------------

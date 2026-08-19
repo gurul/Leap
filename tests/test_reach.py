@@ -342,11 +342,49 @@ def test_dynamic_box_centres_on_the_palm_with_screen_shape():
     x0, y0, x1, y1 = box
     assert (x0 + x1) / 2.0 == pytest.approx(0.7, abs=0.02)
     assert (y0 + y1) / 2.0 == pytest.approx(0.6, abs=0.02)
-    assert (x1 - x0) == pytest.approx(0.30, abs=0.01)       # calibrated width
-    assert (y1 - y0) == pytest.approx(0.30 * src.dyn_h_per_w,
+    # Calibrated width, shrunk by the comfort inset so the box maps to more
+    # than the screen (edge reach lands inside the comfortable envelope).
+    w_expect = 0.30 * src._tuning.inset_scale
+    assert (x1 - x0) == pytest.approx(w_expect, abs=0.01)
+    assert (y1 - y0) == pytest.approx(w_expect * src.dyn_h_per_w,
                                       abs=0.01)   # shaped like the display
     # 14.2-inch MacBook panel: 1512x982 through the 4:3 frame
     assert src.dyn_h_per_w == pytest.approx((4.0 / 3.0) / (1512.0 / 982.0))
+
+
+def test_drag_along_keeps_the_frame_edge_margin():
+    """A box flush against the frame boundary demands knuckles at the image
+    border, where fingers clip and landmarks degrade (2026-08-19 telemetry).
+    The drag-along must stop FRAME_EDGE_MARGIN short of the edge."""
+    from leapinput.camera import FRAME_EDGE_MARGIN
+    src = palm_source()
+    src._resolve_reach("Right", make_lms(0.5, 0.5), make_sig(0.1))
+    for x in (0.7, 0.85, 0.99, 1.0):    # ride the hand hard right
+        box = src._resolve_reach("Right", make_lms(x, 0.5), make_sig(0.1))
+    assert box[2] == pytest.approx(1.0 - FRAME_EDGE_MARGIN)
+    for x in (0.3, 0.1, 0.0):           # and hard left
+        box = src._resolve_reach("Right", make_lms(x, 0.5), make_sig(0.1))
+    assert box[0] == pytest.approx(FRAME_EDGE_MARGIN)
+
+
+def test_rebuild_respects_the_frame_edge_margin():
+    from leapinput.camera import FRAME_EDGE_MARGIN
+    src = palm_source()
+    box = src._resolve_reach("Right", make_lms(0.99, 0.5), make_sig(0.1))
+    assert box[2] == pytest.approx(1.0 - FRAME_EDGE_MARGIN)
+
+
+def test_comfort_inset_shrinks_the_box_and_zero_disables_it():
+    """The inset maps the box to MORE than the screen so edges are reachable
+    inside the comfortable envelope; reach_inset=0 must restore the exact
+    pre-inset width (the knob is the off switch, not a code path)."""
+    inset = palm_source()._resolve_reach("Right", make_lms(0.5, 0.5),
+                                         make_sig(0.1))
+    plain = palm_source(reach_inset=0.0)._resolve_reach(
+        "Right", make_lms(0.5, 0.5), make_sig(0.1))
+    assert (plain[2] - plain[0]) == pytest.approx(0.30, abs=0.01)
+    assert (inset[2] - inset[0]) == pytest.approx(
+        (plain[2] - plain[0]) * Tuning().inset_scale, abs=0.01)
 
 
 def test_dynamic_box_shrinks_with_the_span_keeping_physical_size():
@@ -374,6 +412,58 @@ def test_dynamic_box_holds_inside_and_recenters_after_loss():
     again = src._resolve_reach("Right", make_lms(0.8, 0.8), make_sig(0.1))
     assert again != first
     assert (again[0] + again[2]) / 2.0 == pytest.approx(0.8, abs=0.02)
+
+
+def test_dynamic_box_survives_a_brief_dropout_in_place():
+    """RC-1: a dropout past the 150ms hold used to recentre the box on
+    reappearance, teleporting the cursor to ~screen centre. A quick comeback
+    near where the hand vanished revives the dying box instead."""
+    src = palm_source()
+    first = src._resolve_reach("Right", make_lms(0.3, 0.4), make_sig(0.1),
+                               now_us=1_000_000)
+    src._prev["Right"] = None                       # dropout expired the hold
+    src._reach_now["Right"] = None
+    src._reach_gone["Right"] = (first, 1_000_000)   # ...and stashed the box
+    # 300ms later, same spot: the old box comes back, not a recentred one.
+    again = src._resolve_reach("Right", make_lms(0.32, 0.42), make_sig(0.1),
+                               now_us=1_300_000)
+    assert again == first
+    assert src._reach_gone["Right"] is None         # consumed
+    # A revival just past the edge (inside the 0.05 margin) still runs the
+    # drag-along follow: the hand lands ON the edge, no teleport either way.
+    src._prev["Right"] = None
+    src._reach_now["Right"] = None
+    src._reach_gone["Right"] = (first, 1_000_000)
+    edge = src._resolve_reach("Right", make_lms(first[2] + 0.03, 0.4),
+                              make_sig(0.1), now_us=1_300_000)
+    assert edge[2] == pytest.approx(first[2] + 0.03, abs=0.005)
+    assert edge[2] - edge[0] == pytest.approx(first[2] - first[0])
+
+
+def test_dynamic_box_recenters_after_a_long_or_far_reappearance():
+    """The revival is for dropouts only: a reappearance later than the 500ms
+    continuity window, or away from the old box, keeps the documented
+    come-to-the-hand recentre."""
+    src = palm_source()
+    first = src._resolve_reach("Right", make_lms(0.3, 0.4), make_sig(0.1),
+                               now_us=1_000_000)
+    # Too late: 600ms > the 500ms window lone_hand_side uses.
+    src._prev["Right"] = None
+    src._reach_now["Right"] = None
+    src._reach_gone["Right"] = (first, 1_000_000)
+    late = src._resolve_reach("Right", make_lms(0.32, 0.42), make_sig(0.1),
+                              now_us=1_600_000)
+    assert late != first
+    assert (late[0] + late[2]) / 2.0 == pytest.approx(0.32, abs=0.02)
+    # Too far: outside the old box's 0.05 margin.
+    src._prev["Right"] = None
+    src._reach_now["Right"] = None
+    src._reach_gone["Right"] = (first, 1_000_000)
+    far = src._resolve_reach("Right", make_lms(0.8, 0.8), make_sig(0.1),
+                             now_us=1_300_000)
+    assert far != first
+    assert (far[0] + far[2]) / 2.0 == pytest.approx(0.8, abs=0.02)
+    assert src._reach_gone["Right"] is None         # cleared either way
 
 
 def test_dynamic_box_follows_overshoot_like_a_touch_sheet():
@@ -429,8 +519,11 @@ def test_camera_gain_boost_is_zoom_aware():
 
     boxless = Mapping(plane="xy")
     tune_for_camera(Config(plane="xy"), boxless, Tuning())
-    assert boxless.gain_min == pytest.approx(plain.gain_min * CAMERA_GAIN_BOOST)
-    assert boxless.gain_max == pytest.approx(plain.gain_max * CAMERA_GAIN_BOOST)
+    # Even boxless, the comfort inset delivers 1/inset_scale of zoom, so the
+    # boost only tops up the remainder — total DPI target unchanged.
+    topped = CAMERA_GAIN_BOOST * Tuning().inset_scale
+    assert boxless.gain_min == pytest.approx(plain.gain_min * topped)
+    assert boxless.gain_max == pytest.approx(plain.gain_max * topped)
 
     boxed = Mapping(plane="xy")     # zoom 2.0 > boost 2.0/2.0 => no boost
     tune_for_camera(Config(plane="xy"), boxed,

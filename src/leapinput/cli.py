@@ -18,10 +18,17 @@ from .guard import Guard
 
 
 def _overlay_status(cv2, bgr, engine, tracked, last_intent: str,
-                    stats: dict | None = None) -> None:
+                    stats: dict | None = None, command_engine=None) -> None:
     """Engine truth, not camera truth: what the gesture layer thinks is happening."""
     if tracked is None:
         status, color = "NO HAND", (0, 0, 230)
+    elif command_engine is not None and command_engine.busy:
+        # busy blanks the cursor engine's snapshots; without this branch the
+        # line below would blame the clutch ("LIFTED") for a parked cursor
+        # that a command hold actually owns.
+        label = command_engine.overlay.get("label") or "command"
+        status = f"COMMAND HOLD  ({label} owns the input - cursor parked)"
+        color = (255, 200, 0)
     elif not engine.clutch.state:
         status, color = "LIFTED  (open hand - cursor parked)", (180, 180, 180)
     elif engine.grab.state:
@@ -57,6 +64,47 @@ def _play(sound: str) -> None:
 def _chime(resumed: bool) -> None:
     """Audible pause/resume cue."""
     _play("Glass" if resumed else "Bottle")
+
+
+def _mic_desync_fix(command_engine) -> callable:
+    """Closure for ShortcutDriver.on_forced_release: when the dictation
+    watchdog force-releases Option, the pose state machine must agree the mic
+    is off — otherwise the next thumbs-up 'stops' a mic that is already
+    closed, and the one after that opens it silently. Runs on the watchdog's
+    Timer thread: bool assignment is atomic under the GIL, and _play is a
+    fire-and-forget Popen, so this stays thread-safe by staying tiny."""
+    def _fix() -> None:
+        command_engine._dictating = False
+        _play("Pop")            # the mic-off cue _announce already uses
+    return _fix
+
+
+class _StallWatch:
+    """A stalled frame stream never delivers the empty snapshot that releases
+    held input — the capture thread is the only caller of on_snapshot, so its
+    death (or a wedged device) strands a held mouse button. The guard process
+    only fires on process death and the driver watchdog only covers Option;
+    this covers the gap from the main loop by watching source.frames."""
+
+    def __init__(self, stall_s: float = 0.5):
+        self.stall_s = stall_s
+        self._frames: int | None = None
+        self._since = 0.0
+        self._stalled = False
+
+    def update(self, frames: int, now: float) -> tuple[bool, bool]:
+        """(release, warn). release fires once on entering the stalled state;
+        warn is suppressed when the stream never advanced at all (the phone
+        source legitimately idles before the browser connects)."""
+        if self._frames is None or frames != self._frames:
+            self._frames = frames
+            self._since = now
+            self._stalled = False
+            return False, False
+        if not self._stalled and now - self._since >= self.stall_s:
+            self._stalled = True
+            return True, frames > 0
+        return False, False
 
 
 def resolve_source_defaults(args) -> None:
@@ -206,6 +254,10 @@ def main(argv=None) -> int:
                     help="stop automatically after N seconds (0 = no limit). A "
                          "runaway that owns the cursor is hard to quit by hand, so "
                          "the real backend always gets a deadline by default.")
+    ap.add_argument("--no-telemetry", action="store_true",
+                    help="disable the live diagnostics dashboard + click log")
+    ap.add_argument("--telemetry-port", type=int, default=8788,
+                    help="localhost port for the telemetry dashboard")
     args = ap.parse_args(argv)
 
     if args.list_cameras:
@@ -321,6 +373,10 @@ def main(argv=None) -> int:
                                        pinch_on_mm=gesture_cfg.pinch_on_mm)
         shortcuts = ShortcutDriver(backend, pane_action=args.pane)
         command_engine.subscribe(shortcuts.on_command)
+        # Keep the pose state machine honest when the dictation watchdog
+        # force-releases Option behind its back (plain attribute assignment:
+        # harmless if the driver never fires it).
+        shortcuts.on_forced_release = _mic_desync_fix(command_engine)
 
         # Cmd+Shift+4 shows you the region you're selecting; the finger-frame
         # must too — on the real screen, because the always-on session has no
@@ -361,6 +417,30 @@ def main(argv=None) -> int:
                 # to nothing or Option held while you type.
                 _play("Tink" if e.data.get("active") else "Pop")
         command_engine.subscribe(_announce)
+
+    # Diagnostics: every select.down / grab.down is recorded with its
+    # surrounding signal window, and a localhost dashboard shows the live
+    # pinch trace with a button to tag phantom clicks — evidence first, the
+    # lesson of the 352-click phantom-pinch hunt. Passive subscriber; it can
+    # lose data but never take down the control loop.
+    telemetry = None
+    if not args.no_telemetry:
+        from .telemetry import Telemetry, TelemetryServer
+        tele_dir = Path(os.environ.get("LEAPINPUT_RUN_DIR",
+                                       Path.home() / ".leapinput"))
+        telemetry = Telemetry(engine, command_engine, direct=direct,
+                              source=source, hand=args.hand,
+                              pinch_on_mm=gesture_cfg.pinch_on_mm,
+                              pinch_off_mm=gesture_cfg.pinch_off_mm,
+                              out_dir=tele_dir / "telemetry")
+        engine.subscribe(telemetry.on_intent)
+        tele_url = TelemetryServer(telemetry, port=args.telemetry_port).start()
+        if tele_url:
+            print(f"telemetry dashboard: {tele_url}  "
+                  "(P tags the last click as a phantom)")
+        else:
+            print(f"telemetry port {args.telemetry_port} taken — dashboard "
+                  "off, click log still recording", file=sys.stderr)
 
     # Signal plumbing, asserted here and RE-asserted periodically in the main
     # loop, because two things sabotage it at the OS level:
@@ -429,7 +509,17 @@ def main(argv=None) -> int:
                 screen_overlay.update(command_engine.overlay)
             ok = command_engine.enabled and not command_engine.busy
             engine.on_snapshot(snap if ok else Snapshot())
+            if telemetry is not None:
+                # After the engines, so sampled Schmitt states describe THIS
+                # frame; the real snap, so a blanked cursor engine still
+                # leaves the hand visible in the click log.
+                telemetry.on_snapshot(snap)
         source.subscribe(routed)
+    elif telemetry is not None:
+        def observed(snap):
+            engine.on_snapshot(snap)
+            telemetry.on_snapshot(snap)
+        source.subscribe(observed)
     else:
         source.subscribe(engine.on_snapshot)
 
@@ -522,6 +612,7 @@ def main(argv=None) -> int:
             warned_at = time.monotonic() + 4.0
             lag_warned_at = time.monotonic() + 4.0
             sig_assert_at = time.monotonic() + 2.0
+            stall_watch = _StallWatch()
             while deadline is None or time.monotonic() < deadline:
                 if cv2 is not None:
                     frame_bgr = source.preview_frame
@@ -529,7 +620,8 @@ def main(argv=None) -> int:
                         _overlay_status(cv2, frame_bgr, engine,
                                         source.latest.get(args.hand),
                                         last["intent"],
-                                        getattr(source, "stats", None))
+                                        getattr(source, "stats", None),
+                                        command_engine)
                         if command_engine is not None:
                             _overlay_commands(cv2, frame_bgr,
                                               command_engine.overlay)
@@ -562,6 +654,15 @@ def main(argv=None) -> int:
                           f"{stats['fps']:.0f}fps) — cursor will lag",
                           file=sys.stderr)
                     lag_warned_at = time.monotonic() + 5.0
+                release, stall_warn = stall_watch.update(source.frames,
+                                                         time.monotonic())
+                if release:
+                    # Idempotent: Schmitt.force_off emits nothing when nothing
+                    # is held, and the same call runs in the finally below.
+                    engine.on_snapshot(Snapshot())
+                    if stall_warn:
+                        print("  frame stream stalled — released held input",
+                              file=sys.stderr)
             else:
                 print(f"\nauto-stopped after {args.duration:.0f}s")
         except KeyboardInterrupt:

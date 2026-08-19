@@ -13,6 +13,7 @@ were removed after measurement rather than trimmed for tidiness:
 """
 
 import dataclasses
+from types import SimpleNamespace
 
 from leapinput.capture import HandFrame, Vec3
 
@@ -92,3 +93,74 @@ def test_engagement_reads_a_real_height():
     engine.subscribe(lambda e: seen.append(e.intent))
     engine.on_snapshot(Snapshot(right=hand(Vec3(0.0, 232.0, 0.0))))
     assert Intent.ENGAGE in seen
+
+
+# --- tracking-blip hold (mirrors the camera source's 150ms budget) ------------
+
+def _v(x, y, z):
+    return SimpleNamespace(x=x, y=y, z=z)
+
+
+def _leap_hand(side="Right"):
+    digit = lambda: SimpleNamespace(
+        is_extended=True,
+        distal=SimpleNamespace(next_joint=_v(0.0, 190.0, -20.0)),
+        metacarpal=SimpleNamespace(next_joint=_v(0.0, 180.0, 0.0)))
+    return SimpleNamespace(
+        id=1, type=f"HandType.{side}",
+        palm=SimpleNamespace(position=_v(0.0, 180.0, 0.0),
+                             velocity=_v(50.0, 0.0, 0.0),
+                             normal=_v(0.0, -1.0, 0.0)),
+        pinch_strength=0.9, pinch_distance=12.0, grab_strength=0.0,
+        digits=[digit() for _ in range(5)])
+
+
+def _event(timestamp, hands):
+    return SimpleNamespace(hands=hands, tracking_frame_id=1, timestamp=timestamp)
+
+
+def _listener(seen):
+    import pytest
+    from leapinput import capture
+    if capture.leap is None:
+        pytest.skip("leap bindings not installed")
+    return capture._make_listener(seen.append)
+
+
+def test_a_tracking_blip_inside_150ms_bridges_the_frame():
+    """One empty tracking event used to release every held button. The bridged
+    copy is restamped (the engine clocks off frame timestamps) with velocity
+    frozen (the stale velocity would spike the gain curve)."""
+    seen = []
+    lis = _listener(seen)
+    lis.on_tracking_event(_event(0, [_leap_hand()]))
+    lis.on_tracking_event(_event(50_000, []))
+    lis.on_tracking_event(_event(100_000, []))
+    bridged = seen[1].right
+    assert bridged is not None
+    assert bridged.timestamp == 50_000
+    assert bridged.palm_velocity == Vec3(0.0, 0.0, 0.0)
+    assert seen[2].right is not None
+    assert seen[2].right.timestamp == 100_000
+
+
+def test_the_hold_expires_from_the_original_stamp():
+    """The store keeps the ORIGINAL frame, not the bridged copies, so a chain
+    of blips cannot extend the hold past 150ms of real absence."""
+    seen = []
+    lis = _listener(seen)
+    lis.on_tracking_event(_event(0, [_leap_hand()]))
+    lis.on_tracking_event(_event(100_000, []))
+    assert seen[1].right is not None
+    lis.on_tracking_event(_event(160_000, []))
+    assert seen[2].right is None
+
+
+def test_a_gap_past_150ms_yields_none_and_stays_none():
+    seen = []
+    lis = _listener(seen)
+    lis.on_tracking_event(_event(0, [_leap_hand()]))
+    lis.on_tracking_event(_event(200_000, []))
+    lis.on_tracking_event(_event(210_000, []))
+    assert seen[1].right is None
+    assert seen[2].right is None

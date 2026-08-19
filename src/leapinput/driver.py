@@ -11,6 +11,7 @@ from __future__ import annotations
 import math
 import sys
 from dataclasses import dataclass
+from typing import Callable, Optional
 
 from .actions import Backend
 from .camera import plane_norm
@@ -75,6 +76,22 @@ class Mapping:
     # Scales both gain ends together, so --gain retunes overall sensitivity
     # without disturbing the slow/fast ratio that makes fine aiming possible.
     gain_scale: float = 1.0
+
+    # Touch-mode precision (2026-08-19): slow hand = small target. People
+    # decelerate on final approach (Fitts), so speed is the free, implicit
+    # precision trigger — the same insight TiltReduction (Chang et al.,
+    # CHI 2015) exploited with natural device tilt, and the mechanism is
+    # PRISM (Frees & Kessler): below precision_full_speed the mapped target's
+    # motion is scaled down toward precision_gain_min, accumulating a BOUNDED
+    # offset; at speed the mapping is 1:1 and each frame bleeds the offset
+    # away by precision_recover, so the touch sheet stays position-faithful
+    # for ballistic motion and gains sub-target precision exactly when the
+    # hand says it is aiming (macOS traffic-light buttons are ~12px).
+    # precision_gain_min=1.0 disables the whole layer.
+    precision_gain_min: float = 0.35
+    precision_full_speed: float = 700.0   # px/s of the mapped target
+    precision_offset_max_px: float = 60.0
+    precision_recover: float = 0.10       # offset bleed per full-speed frame
 
     # Axis direction. Leap desktop mode is +x right, +y up, +z TOWARD the user, and
     # CG screen space is +y DOWN, so the raw signs already line up: push the hand
@@ -189,6 +206,18 @@ class DirectDriver:
         # macOS resolves the click target on mouse-up.
         self._down_pos: tuple[float, float] | None = None
         self._travel = 0.0
+        # Absolute (touch) mode only: the live hand target of the last frame,
+        # and the offset that pins the cursor to the anchor-warped commit
+        # position for the whole button hold. Without it the first full-settle
+        # frame after the warp lerps straight back to the live target, the
+        # snap accrues into _travel, and the <12px pin-back refuses — turning
+        # a corrected click into an accidental drag.
+        self._abs_target: tuple[float, float] | None = None
+        self._touch_offset: tuple[float, float] | None = None
+        # Touch precision (PRISM): last raw mapped target + its time, and the
+        # accumulated slow-motion offset. See Mapping.precision_gain_min.
+        self._prec_last: tuple[float, float, float] | None = None
+        self._prec_off: tuple[float, float] = (0.0, 0.0)
 
     def _contain(self, x: float, y: float) -> tuple[float, float]:
         """Clamp to the NEAREST real display, not the union of all of them."""
@@ -331,14 +360,57 @@ class DirectDriver:
         fx, fy = self._filter(p.x, p.y, timestamp_us / 1e6)
         nx, ny = plane_norm(Vec3(fx, fy, 0.0))
         tx, ty = nx * (self.w - 1.0), ny * (self.h - 1.0)
+        # PRISM precision: sub-1:1 gain while the hand moves slowly (final
+        # approach on a small target), 1:1 with offset bleed at speed. Speed
+        # and offset accrual come from the RAW target — measuring the filtered
+        # one would read the 1-euro convergence tail after a flick as a slow
+        # hand and park the cursor short of a corner the hand already reached.
+        # The offset is applied INSIDE _abs_target so the click-pin math below
+        # keeps measuring only the settle-lerp gap.
+        now_s = timestamp_us / 1e6
+        rnx, rny = plane_norm(Vec3(p.x, p.y, 0.0))
+        rtx, rty = rnx * (self.w - 1.0), rny * (self.h - 1.0)
+        g = 1.0
+        if self._prec_last is not None:
+            ltx, lty, lt = self._prec_last
+            dt = now_s - lt
+            if 0.0 < dt <= 0.2:             # continuous stream only: a gap
+                dx, dy = rtx - ltx, rty - lty  # (reacquire) must not read as
+                speed = math.hypot(dx, dy) / dt      # an infinite-speed frame
+                g = min(1.0, max(self.map.precision_gain_min,
+                                 speed / self.map.precision_full_speed))
+                ox = self._prec_off[0] + dx * (g - 1.0)
+                oy = self._prec_off[1] + dy * (g - 1.0)
+                if g >= 1.0:
+                    ox *= 1.0 - self.map.precision_recover
+                    oy *= 1.0 - self.map.precision_recover
+                mag = math.hypot(ox, oy)
+                cap = self.map.precision_offset_max_px
+                if mag > cap:
+                    ox, oy = ox * cap / mag, oy * cap / mag
+                self._prec_off = (ox, oy)
+        self._prec_last = (rtx, rty, now_s)
+        tx += self._prec_off[0]
+        ty += self._prec_off[1]
+        self._abs_target = (tx, ty)
+        if self._touch_offset is not None:
+            # Button held: keep aiming at the anchor-warped commit position.
+            # Hand deltas still move the cursor 1:1 through the offset, so a
+            # real drag drags; the offset-clear snap lands after the click.
+            tx += self._touch_offset[0]
+            ty += self._touch_offset[1]
         if settle <= 0.0:
             return
         px, py = self.x, self.y
         self.x, self.y = self._contain(px + (tx - px) * settle,
                                        py + (ty - py) * settle)
-        if math.hypot(self.x - px, self.y - py) < 1.5:
-            self.x, self.y = px, py     # touch deadband: residual filter
-            return                      # noise must not paint pixels
+        # Touch deadband, scaled with the precision gain: residual filter
+        # noise must not paint pixels, but at sub-1:1 gain that noise is
+        # already scaled down — a fixed 1.5px band would eat the slow
+        # deliberate crawl precision mode exists for. Floor keeps rest quiet.
+        if math.hypot(self.x - px, self.y - py) < max(0.8, 1.5 * g):
+            self.x, self.y = px, py
+            return
         if self._button_down:
             self._travel += math.hypot(self.x - px, self.y - py)
         self.backend.move(self.x, self.y)
@@ -366,16 +438,20 @@ class DirectDriver:
     # and mouse-up is pinned back to the down position.
     CLICK_TRAVEL_PX = 12.0
 
+    def _warp_to_anchor(self, event: IntentEvent) -> None:
+        """Warp only to a FRESH, NEARBY anchor. A slow-forming pinch or a
+        second click in a row used to teleport the cursor back to a
+        position seconds old."""
+        if self._click_anchor is None:
+            return
+        ax, ay, armed_at = self._click_anchor
+        if (event.at - armed_at <= self.ANCHOR_MAX_AGE_S
+                and math.hypot(self.x - ax, self.y - ay) <= self.ANCHOR_MAX_DIST_PX):
+            self.x, self.y = ax, ay
+            self.backend.move(self.x, self.y)
+
     def _on_select_down(self, event: IntentEvent) -> None:
-        if self._click_anchor is not None:
-            ax, ay, armed_at = self._click_anchor
-            # Warp only to a FRESH, NEARBY anchor. A slow-forming pinch or a
-            # second click in a row used to teleport the cursor back to a
-            # position seconds old.
-            if (event.at - armed_at <= self.ANCHOR_MAX_AGE_S
-                    and math.hypot(self.x - ax, self.y - ay) <= self.ANCHOR_MAX_DIST_PX):
-                self.x, self.y = ax, ay
-                self.backend.move(self.x, self.y)
+        self._warp_to_anchor(event)
         self._down(event)
 
     def _on_select_up(self, event: IntentEvent) -> None:
@@ -386,15 +462,33 @@ class DirectDriver:
     # while the vocabulary moved off pinch, so the fist emitted grab.down into
     # nothing and the click silently did nothing at all.
     def _on_grab_down(self, event: IntentEvent) -> None:
+        # A fresh fist gets the same Heisenberg correction a pinch does. But
+        # the pinch-into-fist handover emits grab.down while the button is
+        # already held (no select.up in between), and warping there would
+        # teleport a live drag back to the original click anchor.
+        if not self._button_down:
+            self._warp_to_anchor(event)
         self._down(event)
 
     def _on_grab_up(self, event: IntentEvent) -> None:
         self._up()
+        self._click_anchor = None       # every click cycle re-arms fresh
 
     def _down(self, event: IntentEvent) -> None:
+        if (self.map.absolute and not self._button_down
+                and self._abs_target is not None):
+            # Touch mode: lock the commit position for the whole hold. The
+            # anchor warp just moved the cursor off the live hand target;
+            # without the offset the next full-settle frame snaps it back.
+            self._touch_offset = (self.x - self._abs_target[0],
+                                  self.y - self._abs_target[1])
         self._down_pos = (self.x, self.y)
         self._travel = 0.0
         self._press(True)
+        # Any button-down consumes the anchor. A pinch-to-fist handover is
+        # deliberately silent (no select.up), so a fist-drag used to leave the
+        # pre-drag anchor alive and warp the NEXT pinch-click back to it.
+        self._click_anchor = None
 
     def _up(self) -> None:
         # macOS resolves the click target on mouse-UP. If the button barely
@@ -406,6 +500,7 @@ class DirectDriver:
             self.x, self.y = self._down_pos
             self.backend.move(self.x, self.y)
         self._down_pos = None
+        self._touch_offset = None
         self._press(False)
 
     def _on_scroll(self, event: IntentEvent) -> None:
@@ -437,6 +532,10 @@ class ShortcutDriver:
         self._dict_lock = threading.Lock()
         self._dictating = False
         self._dict_timer: object | None = None
+        # Invoked when the watchdog force-releases the hold, so the layer that
+        # tracks dictation state (the CLI's snapshot gate) can re-sync instead
+        # of silently inverting its next toggle. Wired by cli.py.
+        self.on_forced_release: Optional[Callable[[], None]] = None
 
     def on_command(self, event) -> None:
         name = event.command.value
@@ -457,7 +556,7 @@ class ShortcutDriver:
             self.backend.key(self.KEY_RETURN)
         # "toggle" is handled by the CLI's snapshot gate; nothing to press.
 
-    def _dictate(self, active: bool) -> None:
+    def _dictate(self, active: bool) -> bool:
         """Hold/release the dictation hotkey: a bare Option, the modifier every
         push-to-talk app can be rebound to (Willow Voice here). fn — Willow's
         stock key — is read straight from raw HID by these apps, so a
@@ -466,7 +565,7 @@ class ShortcutDriver:
         import threading
         with self._dict_lock:
             if active == self._dictating:
-                return                      # idempotent on both edges
+                return False                # idempotent on both edges
             self._dictating = active
             if self._dict_timer is not None:
                 self._dict_timer.cancel()
@@ -477,17 +576,27 @@ class ShortcutDriver:
                     self.MAX_DICTATION_S, self._dictation_watchdog)
                 self._dict_timer.daemon = True
                 self._dict_timer.start()
+            return True
 
     def _dictation_watchdog(self) -> None:
+        if not self.release_dictation():
+            return                          # the stop edge won the race
         print(f"[command] dictation force-released after "
               f"{self.MAX_DICTATION_S:.0f}s — stop edge never arrived",
               file=sys.stderr)
-        self.release_dictation()
+        # Tell the state-tracking layer, or its next chime plays inverted. A
+        # callback error must never kill the Timer thread mid-cleanup.
+        if self.on_forced_release is not None:
+            try:
+                self.on_forced_release()
+            except Exception as exc:
+                print(f"[command] on_forced_release failed: {exc}",
+                      file=sys.stderr)
 
-    def release_dictation(self) -> None:
+    def release_dictation(self) -> bool:
         """Idempotent; the CLI calls it unconditionally on exit so the session
-        can never die holding Option down."""
-        self._dictate(False)
+        can never die holding Option down. True when it actually released."""
+        return self._dictate(False)
 
     def _new_pane(self, rect) -> None:
         """Act on the framed region: capture it, or spawn a window over it."""

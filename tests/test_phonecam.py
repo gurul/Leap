@@ -165,3 +165,44 @@ def test_a_stand_bump_is_detected_and_slow_tilt_is_not():
     # A real knock: several m/s^2 away from the gravity estimate.
     s._on_imu({"x": 5.0, "y": 6.0, "z": 1.2})
     assert s.stand_moved_at > 0.0
+
+
+# --- start(): the ready-wait must fail loudly, never silently time out --------
+
+class _FakeReady:
+    """threading.Event stand-in with a scripted wait() result, so the hung
+    case doesn't cost the test 10 real seconds."""
+
+    def __init__(self, result):
+        self._result = result
+
+    def wait(self, timeout=None):
+        return self._result
+
+
+def _startable_server(ready, error):
+    from leapinput.phonecam import _PhoneCamServer
+    s = _PhoneCamServer.__new__(_PhoneCamServer)
+    s._ready = ready
+    s._start_error = error
+    s._thread_main = lambda: None             # thread body stubbed out
+    return s
+
+
+def test_start_raises_when_ready_wait_times_out():
+    import pytest
+    s = _startable_server(_FakeReady(False), None)
+    with pytest.raises(RuntimeError, match="did not start"):
+        s.start()
+
+
+def test_start_still_surfaces_serve_errors():
+    import pytest
+    s = _startable_server(_FakeReady(True), OSError("port in use"))
+    with pytest.raises(RuntimeError, match="failed to start"):
+        s.start()
+
+
+def test_start_returns_when_server_comes_up():
+    s = _startable_server(_FakeReady(True), None)
+    s.start()                                 # no exception on the happy path
