@@ -300,6 +300,26 @@ def _extended(sig: PoseSignals, prev: Optional[tuple[bool, ...]],
     return (thumb, *fingers)
 
 
+def ily_shaped(sig: PoseSignals, tuning: Tuning) -> bool:
+    """Prev-less ILY read (thumb + index + pinky out, middle + ring curled)
+    for ROUTING, before a HandFrame (and its hysteresis) exists.
+
+    Decides whether a LONE detection should trust the classifier's handedness
+    label instead of the identity/continuity assumption. That assumption exists
+    because labels flap on fists and pinches (curled, self-occluded) — but ILY
+    is the most distinctive extended pose in the vocabulary, the one the
+    classifier reads reliably, and the one pose whose left/right routing
+    changes the command entirely: free-hand ILY is Enter, cursor-hand ILY is
+    the pause toggle. Seen in live use: the left hand raised in ILY where the
+    cursor hand just was gets adopted by continuity, and ~1.65s later the
+    session pauses instead of submitting Enter.
+    """
+    thumb = sig.thumb_ratio > 1.0
+    index, middle, ring, pinky = (b < tuning.extended_max_deg
+                                  for b in sig.bends)
+    return thumb and index and pinky and not middle and not ring
+
+
 def _grab_strength(sig: PoseSignals) -> float:
     """Mean finger curl, 0 open .. 1 fist. Same shape as the Leap's signal."""
     total = sum(max(0.0, min(1.0, (bend - GRAB_BEND_LO_DEG)
@@ -666,20 +686,29 @@ class CameraSource:
                     result.handedness, result.hand_landmarks,
                     result.hand_world_landmarks):
                 n = len(result.handedness)
+                sig = pose_signals(wld_lms, img_lms,
+                                   aspect=bgr.shape[0] / bgr.shape[1])
                 side = resolve_side(handedness[0].category_name,
                                     n, self._hand)
                 if n == 1 and self._hand is not None and self._two_hands:
-                    # Free-hand poses exist: a lone detection may genuinely
-                    # be the OTHER hand. Identity wins only on continuity.
-                    lw = self._last_wrist.get(self._hand)
-                    side = lone_hand_side(
-                        resolve_side(handedness[0].category_name, 2, None),
-                        self._hand,
-                        None if lw is None else lw[:2],
-                        (img_lms[0].x, img_lms[0].y),
-                        now_us - (lw[2] if lw is not None else 0))
-                sig = pose_signals(wld_lms, img_lms,
-                                   aspect=bgr.shape[0] / bgr.shape[1])
+                    label_side = resolve_side(
+                        handedness[0].category_name, 2, None)
+                    if ily_shaped(sig, self._tuning):
+                        # ILY: the label decides Enter (free hand) vs pause
+                        # (cursor hand), and the classifier is reliable on
+                        # this maximally-extended pose — the flap-defense
+                        # below stands down so left-hand ILY is always Enter.
+                        side = label_side
+                    else:
+                        # Free-hand poses exist: a lone detection may genuinely
+                        # be the OTHER hand. Identity wins only on continuity.
+                        lw = self._last_wrist.get(self._hand)
+                        side = lone_hand_side(
+                            label_side,
+                            self._hand,
+                            None if lw is None else lw[:2],
+                            (img_lms[0].x, img_lms[0].y),
+                            now_us - (lw[2] if lw is not None else 0))
                 if sig.span_img is not None and sig.span_img < MIN_SPAN_IMG:
                     continue        # beyond working distance: not our hand
                 frame = handframe_of(img_lms, wld_lms, side, self._frame_id,

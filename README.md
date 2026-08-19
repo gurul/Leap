@@ -105,7 +105,7 @@ scripts/leapctl log       # tail the session log
 
 The ILY pose pauses and resumes gesture control in-band — no terminal needed — and `leapctl pause` does the same from a shell (a chime confirms which way it went). The session mirrors the pause state to `~/.leapinput/paused`, so `leapctl status` reports `running (paused, …)` too. The out-of-process guard still covers every crash path, and hand-out-of-view still releases everything instantly.
 
-For a one-click switch, put it in the menu bar (✋ = on, 🤟 = paused — the icon shows the pose that resumes it, ✊ = off):
+For a one-click switch, put it in the menu bar (✋ = on, 🤟 = paused — the icon shows the pose that resumes it, ✊ = off). **Turn on** starts the phone source, so the WebRTC server comes up automatically — open the phone's bookmark and tap Start; until then the session just idles waiting for frames:
 
 ```bash
 VIRTUAL_ENV=$PWD/.venv uv pip install -e '.[menubar]'
@@ -162,6 +162,8 @@ The hand the cursor doesn't follow is a second command palette — raise it alon
 | ILY sign | Enter (submit what you dictated) |
 
 The full dictation loop: thumbs-up (Tink) and speak, thumbs-up again (Pop — Willow pastes), free-hand ILY to submit.
+
+ILY is the one pose where which hand it's on changes the command entirely (free hand = Enter, cursor hand = pause), so it gets special routing: an ILY-shaped hand raised alone is always routed by the handedness label — the "a lone hand is probably the cursor hand" adoption rule (built for flappy fists and pinches) stands down. Left-hand ILY is Enter, even raised exactly where the cursor hand just was; it can no longer be mistaken for the pause toggle.
 
 ### Verified, pose by pose
 

@@ -353,3 +353,44 @@ def test_lone_free_hand_raised_alone_is_believed():
     # Cursor hand recent but ELSEWHERE in the frame:
     assert lone_hand_side("Left", "Right", prev_wrist=(0.8, 0.6),
                           wrist=(0.2, 0.4), elapsed_us=33_000) == "Left"
+
+
+# --- ILY routing: the label decides Enter vs pause (2026-08-18) --------------
+
+def test_ily_shaped_matches_only_the_ily_hand():
+    """The routing-time ILY read: thumb + index + pinky out, middle + ring
+    curled — prev-less, straight off PoseSignals. Everything adjacent (fist,
+    point, open hand, horns) must NOT match, or ordinary cursor work would
+    start trusting flappy labels."""
+    from leapinput.camera import PoseSignals, Tuning, ily_shaped
+
+    t = Tuning()
+
+    def sig(thumb_ratio, bends):
+        return PoseSignals(bends=bends, thumb_ratio=thumb_ratio,
+                           pinch_mm=60.0, span_mm=80.0)
+
+    assert ily_shaped(sig(1.3, (30, 110, 110, 30)), t)          # ILY
+    assert not ily_shaped(sig(0.7, (100, 110, 110, 100)), t)    # fist
+    assert not ily_shaped(sig(1.3, (30, 110, 110, 110)), t)     # point (L)
+    assert not ily_shaped(sig(1.3, (30, 30, 30, 30)), t)        # open hand
+    assert not ily_shaped(sig(0.7, (30, 110, 110, 30)), t)      # horns (no thumb)
+    assert not ily_shaped(sig(1.3, (30, 30, 110, 110)), t)      # V sign
+
+
+def test_lone_left_ily_near_the_cursor_hands_last_spot_is_still_left():
+    """The Enter-vs-pause confusion, end to end at the routing rule: the left
+    hand raised in ILY where the cursor hand just was would be adopted by
+    continuity (lone_hand_side says the configured hand) — but for an
+    ILY-shaped detection the capture loop trusts the label instead, so it must
+    route Left = Enter, never cursor-hand ILY = pause."""
+    from leapinput.camera import (PoseSignals, Tuning, ily_shaped,
+                                  lone_hand_side)
+
+    ily = PoseSignals(bends=(30, 110, 110, 30), thumb_ratio=1.3,
+                      pinch_mm=60.0, span_mm=80.0)
+    # Continuity alone would misroute this detection to the cursor hand:
+    assert lone_hand_side("Left", "Right", prev_wrist=(0.50, 0.50),
+                          wrist=(0.52, 0.51), elapsed_us=33_000) == "Right"
+    # ...which is exactly why the capture loop bypasses it for ILY:
+    assert ily_shaped(ily, Tuning())

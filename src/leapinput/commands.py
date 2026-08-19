@@ -38,6 +38,11 @@ Commands, chosen for zero collision with the cursor vocabulary:
              thumbs-up, deliberately: a resting hand with the thumb out can
              hold thumbs-up until any shift releases-and-fires it, and Enter
              is too consequential for that; ILY never occurs incidentally.
+             LEFT-hand ILY is guaranteed to route here: for a lone ILY-shaped
+             detection the camera layer trusts the handedness label over the
+             identity/continuity assumption (camera.ily_shaped), so an
+             intended Enter can never be adopted as the cursor hand and read
+             as the pause toggle.
 
 The split is by hand: the CURSOR hand owns pointing and its own commands
 (mission control, pause, dictate); the FREE hand is a second command palette
