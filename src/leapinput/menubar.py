@@ -4,6 +4,9 @@
 ILY pose that resumes it); ✊ = off. The menu toggles the session (via
 scripts/leapctl, the single owner of start/stop), pauses/resumes without
 stopping (SIGUSR1 — the ILY pose's terminal-side twin), and opens the log.
+"Turn on" starts the phone source, so the WebRTC server is up before the
+phone's bookmark is opened — no phone yet just means the session idles
+until the stream starts.
 Built on rumps, which is a thin layer over the PyObjC we already ship.
 
 Run it with `leapinput-menubar` (keep it in the background: `nohup ... &`).
@@ -63,7 +66,12 @@ class LeapMenuBar(rumps.App):
         self.toggle_item.title = "Turn on" if state == "off" else "Turn off"
 
     def toggle(self, _) -> None:
-        ctl("on" if self.state() == "off" else "off")
+        if self.state() == "off":
+            # Phone is the flagship source: bring the WebRTC server up with
+            # the session so the phone's bookmark connects without a terminal.
+            ctl("on", "--source", "phone")
+        else:
+            ctl("off")
         self.refresh()
 
     def pause(self, _) -> None:
