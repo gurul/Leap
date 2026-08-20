@@ -54,6 +54,15 @@ class HandFrame:
 
     extended: tuple[bool, ...]  # thumb, index, middle, ring, pinky
     index_tip: Vec3 = None      # the default tracked point
+    # The same fingertip in WHOLE-FRAME coordinates, with no reach box applied.
+    # `index_tip` is expressed inside the box that maps THIS hand, and in
+    # dynamic ("palm") mode that box floats with the hand and is sized by its
+    # apparent span — so the two hands' index_tips live in two different,
+    # independently moving coordinate systems and cannot be compared with each
+    # other. Anything measuring one hand AGAINST the other (the two-hand
+    # framing rectangle) must use this instead. None on sources that have no
+    # reach box at all (the Leap), where index_tip is already absolute.
+    index_tip_frame: Vec3 = None
     knuckles: tuple[Vec3, ...] = ()   # index..pinky MCP joints; see `center`
 
     # Distance compensation for monocular sources: how much to scale MOTION

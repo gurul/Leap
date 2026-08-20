@@ -87,5 +87,17 @@ precision trigger: palm tilt is already tracked for the clutch, and their
 false-positive rule (threshold beyond normal variation, 35° there) is the
 design constraint if we add it. Knobs: `Mapping.precision_*`
 (`precision_gain_min=1.0` disables).
+
+**One box per hand — so hands are not comparable in box coordinates.** In
+touch mapping each hand carries its own box, centred on its own palm and sized
+by its own distance from the camera. `HandFrame.index_tip` is therefore
+expressed inside a coordinate system that belongs to that hand alone: it says
+where the fingertip is *relative to its own palm*, not where the hand is.
+Anything that measures one hand against the other — today only the two-hand
+framing rectangle — must read `index_tip_frame`, the whole-frame copy. Getting
+this wrong is not subtle-but-tolerable: the framing box inverted, growing as
+the hands closed and collapsing as they spread, and a hand leaning toward the
+camera swapped the corners outright (fixed 2026-08-20; the regression tests in
+`tests/test_camera.py` pin all three symptoms).
 `--map relative` restores the mouse-style clutch ratchet (the Leap's
 default — its lopsided reachable volume never fit absolute mapping).

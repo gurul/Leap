@@ -531,3 +531,57 @@ def test_a_capture_thread_crash_releases_held_input_and_reraises():
         src._run(FakeCv2(), FakeMp(), LiveCap(), CrashingLandmarker())
     assert Intent.GRAB_UP in seen and Intent.DISENGAGE in seen
     assert src._prev["Right"] is None
+
+
+# --- the two-hand framing rectangle, across two reach boxes -------------------
+
+def _framing_hands(l_box, r_box, l_at=(0.35, 0.30), r_at=(0.65, 0.70)):
+    """Both hands in the L-pose, each mapped through its OWN reach box — what
+    dynamic ("palm") mode hands to the command layer every frame."""
+    return (handframe_of(_image(*l_at), OPEN, "Left", 1, 0, reach=l_box),
+            handframe_of(_image(*r_at), OPEN, "Right", 1, 0, reach=r_box))
+
+
+def test_pane_rect_measures_the_hands_not_their_reach_boxes():
+    """Regression: the framed rect must describe where the HANDS are.
+
+    In palm mode each hand carries its own box, centred on that palm and sized
+    by that hand's apparent span. Reading the rect off box-relative fingertips
+    measured each tip's offset from its own palm instead — here the right
+    hand's wider box (it is nearer the camera) pushes its normalized tip LEFT
+    of the left hand's, swapping the corners: an inverted box.
+    """
+    from leapinput.commands import frame_rect
+
+    left, right = _framing_hands((0.15, 0.15, 0.45, 0.45),   # snug box
+                                 (0.40, 0.40, 1.00, 1.00))   # nearer: wider box
+    x0, y0, x1, y1 = frame_rect(left, right)
+    assert abs(x0 - 0.35) < 1e-6 and abs(x1 - 0.65) < 1e-6
+    assert abs(y0 - 0.30) < 1e-6 and abs(y1 - 0.70) < 1e-6
+
+    # The corner-swapping symptom, stated directly: box-relative tips put the
+    # LEFT hand to the right of the right hand. The rect must not follow them.
+    from leapinput.camera import plane_norm
+    assert plane_norm(left.index_tip)[0] > plane_norm(right.index_tip)[0]
+
+
+def test_pane_rect_ignores_a_hand_moving_closer_to_the_camera():
+    """Approaching the camera grows that hand's box. The framed region is a
+    position in the frame, so it must not move when only the box does."""
+    from leapinput.commands import frame_rect
+
+    far = frame_rect(*_framing_hands((0.15, 0.15, 0.45, 0.45),
+                                     (0.55, 0.55, 0.85, 0.85)))
+    near = frame_rect(*_framing_hands((0.15, 0.15, 0.45, 0.45),
+                                      (0.20, 0.20, 1.00, 1.00)))
+    assert far == near
+
+
+def test_pane_rect_shrinks_as_the_hands_close_in():
+    from leapinput.commands import frame_rect
+
+    box_l, box_r = (0.15, 0.15, 0.45, 0.45), (0.55, 0.55, 0.85, 0.85)
+    wide = frame_rect(*_framing_hands(box_l, box_r, (0.20, 0.20), (0.80, 0.80)))
+    tight = frame_rect(*_framing_hands(box_l, box_r, (0.45, 0.45), (0.55, 0.55)))
+    assert (tight[2] - tight[0]) < (wide[2] - wide[0])
+    assert tight[0] < tight[2] and tight[1] < tight[3]      # never inverted

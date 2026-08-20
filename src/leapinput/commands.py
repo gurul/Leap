@@ -71,6 +71,7 @@ class Command(str, Enum):
     COPY = "copy"                   # Cmd+C
     PASTE = "paste"                 # Cmd+V
     ENTER = "enter"                 # Return — submit what you dictated
+    DRAG = "drag"                   # data: active=bool — free-hand fist HOLD
 
 
 @dataclass
@@ -194,6 +195,15 @@ def is_thumbs_up(f: HandFrame) -> bool:
     return f.extended == (True, False, False, False, False)
 
 
+def is_fist(f: HandFrame) -> bool:
+    """Every finger curled. The cleanest pose on this hardware — the corpus
+    read 0 extended on 541/542 fist frames — which is why it can be trusted as
+    a HOLD, where a misread costs a stuck mouse button rather than one bad
+    click. On the free hand it is unambiguous: COPY needs a thumb-index pinch
+    with a back finger extended, PASTE two, ENTER three."""
+    return not any(f.extended)
+
+
 def is_v_pose(f: HandFrame) -> bool:
     """Index + middle out, ring + pinky curled; the thumb is IGNORED — a
     natural peace sign often reads thumb-out, and requiring it curled made
@@ -214,8 +224,20 @@ def _norm_point(p) -> tuple[float, float]:
 def frame_rect(a: HandFrame, b: HandFrame) -> tuple[float, float, float, float]:
     """The framed region: the two index fingertips are the diagonal corners.
     Kept deliberately loose (no rectangle-quality test) — corner self-occlusion
-    causes false NEGATIVES, and the preview shows the user what they framed."""
-    (ax, ay), (bx, by) = _norm_point(a.index_tip), _norm_point(b.index_tip)
+    causes false NEGATIVES, and the preview shows the user what they framed.
+
+    WHOLE-FRAME fingertips, never `index_tip`: this is the one place two hands
+    are measured against each other, and `index_tip` is relative to the reach
+    box mapping that hand alone. Once those boxes became dynamic (each centred
+    on its own palm, each SIZED BY THAT HAND'S DISTANCE), this read each tip's
+    offset from its own palm instead of where the hands were — so bringing a
+    hand closer to the camera grew its box, shrank its normalized offset, and
+    swapped the corners: the box inverted. The frame is the canvas, as it was
+    before reach boxes existed.
+    """
+    pa = a.index_tip_frame if a.index_tip_frame is not None else a.index_tip
+    pb = b.index_tip_frame if b.index_tip_frame is not None else b.index_tip
+    (ax, ay), (bx, by) = _norm_point(pa), _norm_point(pb)
     return (min(ax, bx), min(ay, by), max(ax, bx), max(ay, by))
 
 
@@ -232,6 +254,11 @@ class CommandEngine:
     # to outlast the hand-opening transition (~0.1-0.3s at 30fps) without
     # noticeably delaying a deliberate pose formed from a fist.
     BUTTON_POSE_SHADOW_S = 0.4
+
+    # How long the free hand must hold a fist before the button presses. Long
+    # enough that a hand closing on its way to somewhere else does not drag,
+    # short enough that a deliberate grab feels immediate.
+    DRAG_ARM_S = 0.18
 
     def __init__(self, hand: str = "Right", pinch_on_mm: float = 50.0,
                  clock: Callable[[], float] = time.monotonic):
@@ -261,6 +288,8 @@ class CommandEngine:
         # (the same argument that put fire_on_fill on the pause toggle).
         self.enter = PoseHold(dwell=0.3, fire_on_fill=True)
         self._dictating = False
+        self._dragging = False                  # free-hand fist holds the button
+        self._drag_since: Optional[float] = None
         self._rect: Optional[tuple] = None      # last rect while framing
         self._now = 0.0
         # When the cursor hand was last in a BUTTON posture. Cursor-hand
@@ -380,6 +409,12 @@ class CommandEngine:
             if self._dictating:
                 self._dictating = False
                 self._emit(Command.DICTATE, active=False)
+            # Same reasoning, worse consequence: a mouse button held by a
+            # fist nobody is watching outlives the pause.
+            self._drag_since = None
+            if self._dragging:
+                self._dragging = False
+                self._emit(Command.DRAG, active=False)
             return
 
         # NEW_PANE: both hands in the L-pose. The rect is captured live so the
@@ -424,3 +459,28 @@ class CommandEngine:
         entering = (not framing and other is not None and is_ily_pose(other))
         if self.enter.update(entering, now, present=other is not None):
             self._emit(Command.ENTER)
+
+        # DRAG: a free-hand FIST holds the mouse button while the cursor hand
+        # keeps pointing — one hand holds, the other moves, which is how a
+        # mouse has always worked. This is the ONLY drag: the pinch is pinned
+        # to a single pixel (Mapping.pinch_drag), because a pinch that dragged
+        # selected text every time it drifted.
+        #
+        # A HOLD, not a dwell-toggle: rotating a figure wants the button down
+        # for exactly as long as the fist is closed. Arming costs
+        # DRAG_ARM_S so a hand passing through a fist cannot press; RELEASE IS
+        # NEVER GATED — an opened hand, a vanished hand and a disabled engine
+        # all drop the button on the same frame, because a stuck mouse button
+        # is the worst failure this project has.
+        fisted = (not framing and other is not None and is_fist(other))
+        if not fisted:
+            self._drag_since = None
+            if self._dragging:
+                self._dragging = False
+                self._emit(Command.DRAG, active=False)
+        else:
+            if self._drag_since is None:
+                self._drag_since = now
+            if not self._dragging and now - self._drag_since >= self.DRAG_ARM_S:
+                self._dragging = True
+                self._emit(Command.DRAG, active=True)

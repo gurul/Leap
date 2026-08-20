@@ -565,6 +565,9 @@ def handframe_of(image_lms, world_lms, side: str, frame_id: int,
         grab_strength=grab,
         extended=_extended(sig, prev.extended if prev else None, tuning),
         index_tip=_to_plane(image_lms[INDEX_TIP], reach),
+        # Box-free copy: the two-hand framing rectangle needs both fingertips
+        # in ONE coordinate system, and per-hand boxes are not that.
+        index_tip_frame=_to_plane(image_lms[INDEX_TIP]),
         knuckles=knuckles,
         motion_scale=motion_scale,
     )
