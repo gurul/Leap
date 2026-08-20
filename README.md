@@ -37,8 +37,14 @@ Always-on, once it's good enough to live with:
 
 ```bash
 scripts/leapctl on          # detached; leapctl off / status / log
+scripts/leapctl on --source phone     # opt in to the phone/WebRTC source
 nohup .venv/bin/leapinput-menubar >/dev/null 2>&1 &   # ✋ one-click menu bar switch
 ```
+
+The menu bar's **Turn on** always starts the built-in camera — nothing
+listens on the LAN unless you ask. **Use phone camera** is the explicit
+opt-in: it starts (or switches to) the WebRTC source and copies the stream
+URL to the clipboard for the phone to open.
 
 The ILY pose (or `leapctl pause`) pauses and resumes gesture control in-band.
 
