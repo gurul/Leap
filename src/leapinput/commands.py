@@ -52,12 +52,14 @@ thumbs-up dictates, free-hand ILY submits.
 
 from __future__ import annotations
 
+import statistics
 import time
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Optional
 
-from .capture import HandFrame, Snapshot
+from .capture import HandFrame, Snapshot, Vec3
+from .oneeuro import OneEuroPlane
 
 # Normalized-rect conversion shares the camera's virtual plane constants.
 from .camera import PLANE_X_MM, PLANE_Y_BASE, PLANE_Y_MM
@@ -241,7 +243,8 @@ def _norm_point(p) -> tuple[float, float]:
     return (min(1.0, max(0.0, xn)), min(1.0, max(0.0, yn)))
 
 
-def frame_rect(a: HandFrame, b: HandFrame) -> tuple[float, float, float, float]:
+def frame_rect(a: HandFrame, b: HandFrame, smooth=None,
+               now: float = 0.0) -> tuple[float, float, float, float]:
     """The framed region: the two index fingertips are the diagonal corners.
     Kept deliberately loose (no rectangle-quality test) — corner self-occlusion
     causes false NEGATIVES, and the preview shows the user what they framed.
@@ -257,6 +260,8 @@ def frame_rect(a: HandFrame, b: HandFrame) -> tuple[float, float, float, float]:
     """
     pa = a.index_tip_frame if a.index_tip_frame is not None else a.index_tip
     pb = b.index_tip_frame if b.index_tip_frame is not None else b.index_tip
+    if smooth is not None:
+        pa, pb = smooth(a.side, pa, now), smooth(b.side, pb, now)
     (ax, ay), (bx, by) = _norm_point(pa), _norm_point(pb)
     return (min(ax, bx), min(ay, by), max(ax, bx), max(ay, by))
 
@@ -279,6 +284,30 @@ class CommandEngine:
     # enough that a hand closing on its way to somewhere else does not drag,
     # short enough that a deliberate grab feels immediate.
     DRAG_ARM_S = 0.18
+
+    # Frame-shot commit window. The guard is sized to the Schmitt swing that
+    # keeps a releasing hand classified as framing (extend_off 80deg back
+    # under extend_on 61deg is most of a finger's uncurl, ~3-6 frames at
+    # 30fps); the settle window behind it is long enough for a median to mean
+    # something and short enough to still be the composition you were holding.
+    RECT_RELEASE_GUARD_S = 0.20
+    RECT_SETTLE_WINDOW_S = 0.30
+    RECT_LOG_MAX = 150              # ~5s at 30fps, bounded so a long hold cannot grow
+
+    # 1-euro smoothing for the framing fingertips, at the camera operating
+    # point tune_for_camera already fitted for landmark noise (min_cutoff 1.5,
+    # beta 0.03, d_cutoff 2.0 at 30fps). NOT scaled by reach zoom the way the
+    # pointer's beta is: the frame rect is measured in WHOLE-FRAME units, so
+    # there is no box magnifying the noise or the motion.
+    TIP_MIN_CUTOFF = 1.5
+    TIP_BETA = 0.03
+    TIP_D_CUTOFF = 2.0
+
+    # How long after a framing hold arms that a lone thumbs-up is refused.
+    # The L-pose and thumbs-up differ by ONE finger (index), so a hand entering
+    # or leaving the frame pose passes THROUGH thumbs-up; without this the mic
+    # opens while you compose a shot.
+    FRAME_SHADOW_S = 0.6
 
     # How stale a pose match may be and still hold the input. Two frames at
     # the 20Hz detection budget; shorter than PoseHold.grace on purpose, so a
@@ -325,7 +354,21 @@ class CommandEngine:
         self._dictating = False
         self._dragging = False                  # free-hand fist holds the button
         self._drag_since: Optional[float] = None
-        self._rect: Optional[tuple] = None      # last rect while framing
+        self._rect: Optional[tuple] = None      # live rect, for the preview
+        # (t, rect) while framing — the record _committed_rect picks from.
+        self._rect_log: list[tuple[float, tuple]] = []
+        self._frame_broke_at: Optional[float] = None
+        # Per-hand fingertip smoothing for the frame rect. See _framing_tip:
+        # the rect reads RAW landmarks, and the old reach-box version hid that
+        # noise by accident rather than by design.
+        self._tip_filter = {
+            "Left": OneEuroPlane(freq=30.0, min_cutoff=self.TIP_MIN_CUTOFF,
+                                 beta=self.TIP_BETA,
+                                 d_cutoff=self.TIP_D_CUTOFF),
+            "Right": OneEuroPlane(freq=30.0, min_cutoff=self.TIP_MIN_CUTOFF,
+                                  beta=self.TIP_BETA,
+                                  d_cutoff=self.TIP_D_CUTOFF)}
+        self._frame_armed_at: Optional[float] = None
         self._now = 0.0
         # When the cursor hand was last in a BUTTON posture. Cursor-hand
         # command poses inside the shadow are transitions, not commands — see
@@ -343,6 +386,59 @@ class CommandEngine:
         event = CommandEvent(command, self._now, data)
         for fn in self._subscribers:
             fn(event)
+
+    def _framing_tip(self, side: str, p, now: float):
+        """1-euro smoothed fingertip, for the frame rect only.
+
+        The rect is the one consumer of position in this project that reads
+        RAW landmarks — every cursor path filters first. The old box-relative
+        version hid that noise by accident rather than design: with a
+        palm-following reach box, a tip was measured RELATIVE TO ITS OWN PALM,
+        so whole-hand shake cancelled as common mode. Measuring absolutely is
+        what made the rect correct, and it also exposed the noise that
+        accidental differential had been suppressing — so the smoothing now
+        has to be deliberate. Same filter, same constants as the pointer at
+        the camera operating point.
+        """
+        f = self._tip_filter.get(side)
+        if f is None or p is None:
+            return p
+        x, y = f(p.x, p.y, now)
+        return Vec3(x, y, 0.0)
+
+    def _committed_rect(self, now: float):
+        """What you COMPOSED, not what your release did.
+
+        The defect this exists for: `extended` is a Schmitt trigger, so a
+        finger uncurling out of the L must swing from past extend_off back
+        under extend_on before it stops reading as extended. For that whole
+        swing the pose still classifies as framing while the hand is already
+        moving — and those frames were the ones overwriting the rect, so the
+        commit sampled the single worst moment of the gesture. Reported from
+        live use 2026-08-20: "frame sets up perfectly... whenever I try to
+        release out, it kinda distorts the frame".
+
+        Fix: ignore everything within RELEASE_GUARD_S of the release, and take
+        the MEDIAN of the settle window before that. The median matters as
+        much as the guard — one late landmark spike inside the window would
+        drag a mean, and the corner of a rect is exactly where a spike lands.
+
+        This is the click anchor's argument, applied to two hands: trust where
+        the user was aiming before the gesture that commits it moved them.
+        """
+        if not self._rect_log:
+            return self._rect
+        broke = self._frame_broke_at if self._frame_broke_at is not None else now
+        cutoff = broke - self.RECT_RELEASE_GUARD_S
+        window = [r for t, r in self._rect_log
+                  if cutoff - self.RECT_SETTLE_WINDOW_S <= t <= cutoff]
+        if not window:
+            # Held only just long enough for the ring: everything on record is
+            # inside the guard. The OLDEST sample is still the least
+            # release-contaminated one available, which is the whole point.
+            window = [self._rect_log[0][1]]
+        return tuple(statistics.median(sorted(r[i] for r in window))
+                     for i in range(4))
 
     @property
     def busy(self) -> bool:
@@ -434,13 +530,24 @@ class CommandEngine:
         # ring stay curled, refreshing the shadow), and the pause arming
         # mid-drag blanks the cursor engine via `busy` and drops the drag.
         # Disabled needs no gate — there is nothing held to protect.
+        # FRAME SHADOW — while a frame shot is being composed, NOTHING else
+        # fires until it is released. The user's own diagnosis, and it is the
+        # right one: the L-pose is thumbs-up plus an extended index, and a
+        # hand entering or leaving it passes through thumbs-up (and, briefly,
+        # through shapes near V and ILY). Guarding only the frames where BOTH
+        # hands still read as L leaves exactly the transition unguarded, which
+        # is where the mic was opening. One composition, one command.
+        frame_shadow = (self._frame_armed_at is not None
+                        and now - self._frame_armed_at < self.FRAME_SHADOW_S)
+
         # PAUSE. Legacy keeps ILY on the cursor hand. Minimal moves it to a
         # held FIST, on either hand: ILY had to become Enter (there is no
         # cursor hand left to distinguish the two), and the fist is the
         # cleanest pose on this hardware — 0 extended on 541/542 corpus frames
         # — which is what a toggle nobody is watching needs. It is also the
         # only pose minimal mode does not otherwise use.
-        paused_pose = (mine is not None and is_ily_pose(mine)
+        paused_pose = (not frame_shadow and mine is not None
+                       and is_ily_pose(mine)
                        and (not self.enabled or not pinch_shadow))
         if self.toggle.update(paused_pose, now, present=mine is not None):
             self.enabled = not self.enabled
@@ -467,23 +574,38 @@ class CommandEngine:
                 self._emit(Command.DRAG, active=False)
             return
 
-        # NEW_PANE: both hands in the L-pose. The rect is captured live so the
-        # release commits what the preview showed, not a post-release slump.
+        # NEW_PANE: both hands in the L-pose. The rect is sampled every framing
+        # frame, but what COMMITS is the composition, not the release — see
+        # _committed_rect. `_rect` stays live because that is what the on-screen
+        # preview draws.
         both = snap.left is not None and snap.right is not None
         framing = (both and is_frame_pose(snap.left)
                    and is_frame_pose(snap.right))
         if framing:
-            self._rect = frame_rect(snap.left, snap.right)
+            self._rect = frame_rect(snap.left, snap.right,
+                                    smooth=self._framing_tip, now=now)
+            self._rect_log.append((now, self._rect))
+            if len(self._rect_log) > self.RECT_LOG_MAX:
+                del self._rect_log[:-self.RECT_LOG_MAX]
+            self._frame_broke_at = None
+        elif self.pane.armed and self._frame_broke_at is None:
+            self._frame_broke_at = now      # the release began HERE
         if self.pane.update(framing, now, present=both):
-            self._emit(Command.NEW_PANE, rect=self._rect)
+            self._emit(Command.NEW_PANE, rect=self._committed_rect(now))
+        if self.pane.armed:
+            self._frame_armed_at = now      # feeds the frame shadow
         if not framing and not self.pane.armed:
             self._rect = None
+            self._rect_log.clear()
+            self._frame_broke_at = None
+            for f in self._tip_filter.values():
+                f.reset()                   # a new composition starts clean
 
         # MISSION: the OK pose, one hand, never while framing or in the
         # shadow of a click-pinch it could be opening out of.
         if not self.minimal:
-            ok = (not framing and not pinch_shadow and mine is not None
-                  and is_ok_pose(mine, self.pinch_on_mm))
+            ok = (not framing and not frame_shadow and not pinch_shadow
+                  and mine is not None and is_ok_pose(mine, self.pinch_on_mm))
             if self.mission.update(ok, now, present=mine is not None):
                 self._emit(Command.MISSION_CONTROL)
 
@@ -499,7 +621,7 @@ class CommandEngine:
         # deliberate release as a fire — conflating them means the hold can
         # never complete.
         seen = snap.left is not None or snap.right is not None
-        thumb = (not framing and not fist_shadow
+        thumb = (not framing and not fist_shadow and not frame_shadow
                  and (_either(snap, is_thumbs_up) is not None if self.minimal
                       else (mine is not None and is_thumbs_up(mine))))
         if self.dictate.update(thumb, now,
@@ -516,11 +638,11 @@ class CommandEngine:
         # nobody asked for.
         other = snap.left if self.hand == "Right" else snap.right
         if not self.minimal:
-            copying = (not framing and other is not None
+            copying = (not framing and not frame_shadow and other is not None
                        and is_pinch_hold(other, self.pinch_on_mm))
             if self.copy.update(copying, now, present=other is not None):
                 self._emit(Command.COPY)
-        pasting = (not framing
+        pasting = (not framing and not frame_shadow
                    and (_either(snap, is_v_pose) is not None if self.minimal
                         else (other is not None and is_v_pose(other))))
         if self.paste.update(pasting, now,
@@ -532,7 +654,8 @@ class CommandEngine:
         # in both modes. Everything else in minimal answers to either hand;
         # this one cannot, and splitting it is what pays for having a pause at
         # all without spending a second pose on it.
-        entering = (not framing and other is not None and is_ily_pose(other))
+        entering = (not framing and not frame_shadow
+                    and other is not None and is_ily_pose(other))
         if self.enter.update(entering, now, present=other is not None):
             self._emit(Command.ENTER)
 
@@ -548,8 +671,8 @@ class CommandEngine:
         # NEVER GATED — an opened hand, a vanished hand and a disabled engine
         # all drop the button on the same frame, because a stuck mouse button
         # is the worst failure this project has.
-        fisted = (not self.minimal and not framing and other is not None
-                  and is_fist(other))
+        fisted = (not self.minimal and not framing and not frame_shadow
+                  and other is not None and is_fist(other))
         if not fisted:
             self._drag_since = None
             if self._dragging:

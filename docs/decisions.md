@@ -163,6 +163,54 @@ drops).
 
 ---
 
+## 2026-08-20 — the frame shot commits the composition, not the release
+
+**What.** Three changes to the one gesture that matters most:
+1. `_committed_rect` — ignore every sample within 0.20 s of the release, and
+   commit the **median** of the 0.30 s settle window before that.
+2. The framing fingertips are 1-euro smoothed (`_framing_tip`).
+3. A **frame shadow**: while a framing hold is armed, and for 0.6 s after, no
+   other command can fire.
+
+**Why (1).** *"frame sets up perfectly. But now the problem is whenever I try
+to click or release out, it kinda distorts the frame."* `extended` is a
+Schmitt trigger (extend_on 61°, extend_off 80°), so a finger uncurling out of
+the L keeps reading as extended for several frames while the hand is already
+moving. Those frames still classified as framing — and they were the ones
+overwriting the rect, so the commit sampled the single worst moment of the
+gesture.
+
+**Evidence (1).** Regression test: a rect composed at (0.25, 0.25, 0.75, 0.75)
+committed as **(0.4375, 0.4167, 0.5625, 0.5833)** on the old code — about a
+quarter of the intended area. This is the click anchor's argument applied to
+two hands: trust where the user was aiming before the gesture that commits it
+moved them.
+
+**Why (2).** The rect was the only consumer of position in the project reading
+RAW landmarks. The pre-fix box-relative version hid that noise *by accident*:
+with a palm-following reach box, a tip was measured relative to its own palm,
+so whole-hand shake cancelled as common mode. Making the rect correct (absolute,
+whole-frame) exposed noise that accidental differential had been suppressing.
+Mild and adaptive — the same 1-euro constants the pointer uses at the camera
+operating point.
+
+**Caveat, honestly.** The user later attributed the observed jitter mostly to
+**lighting** — a dark room with poor foreground/background separation is hard
+for a lightweight model. The smoothing is still right on principle, but it was
+probably not the cause of what was reported.
+
+**Why (3).** The user's own diagnosis, and the better one: *"not allowing
+other things to be triggered while the framing is happening. Until it's
+released."* The L-pose is thumbs-up plus an extended index, so a hand entering
+or leaving it passes **through** thumbs-up — and `not framing` only guards the
+frames where BOTH hands still read as L. The transition, where exactly one
+hand has lost its index, was the unguarded gap the mic fired through.
+
+**Restore.** Raise `TIP_MIN_CUTOFF` for less smoothing (or set the filters
+aside entirely); `FRAME_SHADOW_S = 0.0` disables the shadow.
+
+---
+
 ## 2026-08-20 — "off" must mean off
 
 **What.** `leapctl off` now sweeps three process patterns instead of one:

@@ -703,3 +703,167 @@ def test_legacy_still_has_the_whole_vocabulary():
     engine = CommandEngine(hand="Right")
     assert drag_events(engine, [fist_snap(t * FRAME_US) for t in range(1, 20)]) \
         == [(Command.DRAG, True)]
+
+
+# --- the frame shot commits the composition, not the release ------------------
+
+def test_release_frames_cannot_distort_the_committed_rect():
+    """The reported defect (2026-08-20, live use): "frame sets up perfectly...
+    whenever I try to release out, it kinda distorts the frame".
+
+    `extended` is a Schmitt trigger, so a finger uncurling out of the L keeps
+    reading as extended for several frames while the hand is already moving.
+    Those frames still classify as framing — and they were the ones the commit
+    sampled.
+    """
+    engine = minimal()
+    fired = []
+    engine.subscribe(lambda e: fired.append(e))
+
+    STEADY_L = Vec3(-80.0, 260.0, 0.0)
+    STEADY_R = Vec3(80.0, 380.0, 0.0)
+    t = 0
+    while t / 1e6 < 1.2:                        # compose, held steady
+        t += FRAME_US
+        engine.on_snapshot(both_hands(t, STEADY_L, STEADY_R))
+    # The release: fingers moving, pose STILL classified as framing.
+    for i in range(1, 5):
+        t += FRAME_US
+        engine.on_snapshot(both_hands(t,
+                                      Vec3(-80.0 + i * 25, 260.0 + i * 20, 0.0),
+                                      Vec3(80.0 - i * 25, 380.0 - i * 20, 0.0)))
+    for _ in range(8):                          # pose finally drops -> fires
+        t += FRAME_US
+        engine.on_snapshot(Snapshot(left=frame("Left", t, OPEN),
+                                    right=frame("Right", t, OPEN)))
+
+    panes = [e for e in fired if e.command is Command.NEW_PANE]
+    assert len(panes) == 1
+    steady = frame_rect(frame("Left", 0, L_POSE, index_tip=STEADY_L),
+                        frame("Right", 0, L_POSE, index_tip=STEADY_R))
+    got = panes[0].data["rect"]
+    for a, b in zip(got, steady):
+        assert abs(a - b) < 1e-6, f"release contaminated the rect: {got} vs {steady}"
+
+
+def test_a_single_landmark_spike_cannot_move_the_rect():
+    """Median, not mean: one bad corner frame inside the settle window would
+    drag an average, and a rect corner is exactly where a spike lands."""
+    engine = minimal()
+    fired = []
+    engine.subscribe(lambda e: fired.append(e))
+
+    STEADY_L, STEADY_R = Vec3(-80.0, 260.0, 0.0), Vec3(80.0, 380.0, 0.0)
+    t = 0
+    while t / 1e6 < 1.0:
+        t += FRAME_US
+        spike = (t / 1e6 > 0.80 and t / 1e6 < 0.84)     # one frame, far off
+        engine.on_snapshot(both_hands(
+            t,
+            Vec3(-150.0, 200.0, 0.0) if spike else STEADY_L,
+            STEADY_R))
+    for _ in range(10):
+        t += FRAME_US
+        engine.on_snapshot(Snapshot(left=frame("Left", t, OPEN),
+                                    right=frame("Right", t, OPEN)))
+
+    panes = [e for e in fired if e.command is Command.NEW_PANE]
+    assert len(panes) == 1
+    steady = frame_rect(frame("Left", 0, L_POSE, index_tip=STEADY_L),
+                        frame("Right", 0, L_POSE, index_tip=STEADY_R))
+    for a, b in zip(panes[0].data["rect"], steady):
+        assert abs(a - b) < 1e-6
+
+
+def test_a_short_hold_still_commits_something_sane():
+    """Held only just long enough to fill the ring: everything on record sits
+    inside the guard, and the commit must still be a real rect."""
+    engine = CommandEngine(hand="Right", minimal=True)
+    fired = []
+    engine.subscribe(lambda e: fired.append(e))
+    t = 0
+    while t / 1e6 < 0.85:                       # ~ arm + dwell, no more
+        t += FRAME_US
+        engine.on_snapshot(both_hands(t, Vec3(-80.0, 260.0, 0.0),
+                                      Vec3(80.0, 380.0, 0.0)))
+    for _ in range(8):
+        t += FRAME_US
+        engine.on_snapshot(Snapshot(left=frame("Left", t, OPEN),
+                                    right=frame("Right", t, OPEN)))
+    panes = [e for e in fired if e.command is Command.NEW_PANE]
+    assert len(panes) == 1
+    x0, y0, x1, y1 = panes[0].data["rect"]
+    assert x0 < x1 and y0 < y1
+
+
+# --- one composition, one command --------------------------------------------
+
+def test_forming_the_frame_pose_cannot_open_the_mic():
+    """The L-pose is thumbs-up plus an extended index, so a hand entering or
+    leaving the frame gesture passes THROUGH thumbs-up. Reported live: "it
+    also triggers the mic sometimes"."""
+    engine = minimal()
+    fired = []
+    engine.subscribe(lambda e: fired.append(e))
+    L, R = Vec3(-80.0, 260.0, 0.0), Vec3(80.0, 380.0, 0.0)
+    t = 0
+    while t / 1e6 < 1.0:                        # compose: arms the pane hold
+        t += FRAME_US
+        engine.on_snapshot(both_hands(t, L, R))
+    # Break it the way a hand really does: one index drops first, so THIS hand
+    # now reads as a clean thumbs-up while the other is still an L.
+    while t / 1e6 < 1.9:
+        t += FRAME_US
+        engine.on_snapshot(Snapshot(
+            left=frame("Left", t, THUMBS_UP, index_tip=L),
+            right=frame("Right", t, L_POSE, index_tip=R)))
+    assert [e.command for e in fired if e.command is Command.DICTATE] == []
+    assert engine._dictating is False
+
+
+def test_the_frame_shadow_blocks_every_other_command():
+    """One composition, one command — nothing else fires until it is done."""
+    engine = minimal()
+    L, R = Vec3(-80.0, 260.0, 0.0), Vec3(80.0, 380.0, 0.0)
+    t = 0
+    while t / 1e6 < 1.0:
+        t += FRAME_US
+        engine.on_snapshot(both_hands(t, L, R))
+
+    for pose, cmd in ((V_POSE, Command.PASTE), (ILY, Command.ENTER),
+                      (THUMBS_UP, Command.DICTATE)):
+        fired = []
+        e2 = minimal()
+        e2.subscribe(lambda ev: fired.append(ev))
+        t2 = 0
+        while t2 / 1e6 < 1.0:                   # arm a composition
+            t2 += FRAME_US
+            e2.on_snapshot(both_hands(t2, L, R))
+        while t2 / 1e6 < 1.5:                   # then try to fire something else
+            t2 += FRAME_US
+            e2.on_snapshot(Snapshot(left=frame("Left", t2, pose),
+                                    right=frame("Right", t2, OPEN)))
+        assert [x for x in fired if x.command is cmd] == [], \
+            f"{cmd} fired inside the frame shadow"
+
+
+def test_the_shadow_expires_so_normal_use_resumes():
+    engine = minimal()
+    L, R = Vec3(-80.0, 260.0, 0.0), Vec3(80.0, 380.0, 0.0)
+    t = 0
+    while t / 1e6 < 1.0:
+        t += FRAME_US
+        engine.on_snapshot(both_hands(t, L, R))
+    while t / 1e6 < 1.0 + engine.FRAME_SHADOW_S + 0.3:   # let it lapse
+        t += FRAME_US
+        engine.on_snapshot(Snapshot(left=frame("Left", t, OPEN),
+                                    right=frame("Right", t, OPEN)))
+    fired = []
+    engine.subscribe(lambda e: fired.append(e))
+    while t / 1e6 < 3.5:
+        t += FRAME_US
+        engine.on_snapshot(Snapshot(left=frame("Left", t, V_POSE)))
+    for _ in range(12):
+        t += FRAME_US
+        engine.on_snapshot(Snapshot(left=frame("Left", t, OPEN)))
+    assert [e.command for e in fired] == [Command.PASTE]
