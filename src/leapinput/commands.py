@@ -309,6 +309,9 @@ class CommandEngine:
     # opens while you compose a shot.
     FRAME_SHADOW_S = 0.6
 
+    # Flicker guard before any ring starts filling. Three frames at ~30fps.
+    ARM = 0.10
+
     # How stale a pose match may be and still hold the input. Two frames at
     # the 20Hz detection budget; shorter than PoseHold.grace on purpose, so a
     # flicker releases the cursor immediately instead of 0.12s later.
@@ -334,26 +337,35 @@ class CommandEngine:
         self._clock = clock
         self._last_wall: Optional[float] = None
         self.enabled = True
-        self.pane = PoseHold(dwell=0.65)        # ~0.8s total with arm
-        self.mission = PoseHold(dwell=0.45)     # ~0.6s total
-        # ~1.65s total. Was ~1s, and a live headless session paused itself: a
-        # relaxed hand with middle+ring drooping reads as ILY, and one second
-        # of it is easy to produce by accident. The pause must be deliberate.
-        # fire_on_fill: the pause chime sounds the moment the hold completes,
-        # not after you release — holding past a silent full ring feels broken.
-        self.toggle = PoseHold(dwell=1.5, fire_on_fill=True)
-        # fire_on_fill so the mic flips the moment the ring fills. A TOGGLE,
-        # not a hold: the hold form failed in live use (unsustainable to hold,
-        # easy to drift out of the camera's view) and the ergonomics
-        # literature agrees — sustained static holds are the fatigue case,
-        # short deliberate poses are the comfort case.
-        self.dictate = PoseHold(dwell=0.45, fire_on_fill=True)
-        self.copy = PoseHold(dwell=0.45)        # free hand, fire on release
-        self.paste = PoseHold(dwell=0.45)
-        # fire_on_fill + short dwell: Enter felt slow on release-commit, and
-        # the abort window buys nothing here — ILY never occurs incidentally
-        # (the same argument that put fire_on_fill on the pause toggle).
-        self.enter = PoseHold(dwell=0.3, fire_on_fill=True)
+        # SNAPPY (2026-08-20, from live use: "make all gestures as snappy as
+        # possible... a really fast, smooth workflow"). Every dwell here was
+        # sized when a stray pose could hijack a CURSOR. It cannot any more:
+        # there is no pointer, the frame shadow gives a composition exclusive
+        # ownership of the input, and every remaining command is cheap to undo
+        # (one Cmd+Z, one Return, one more thumbs-up). So the deliberation
+        # windows shrink, and where a command used to wait for the RELEASE it
+        # now fires as the ring fills — the release-commit was buying an abort
+        # window that only mattered while a cursor was at stake.
+        #
+        # ARM does not shrink to zero. It is the single-frame flicker guard,
+        # and at ~30fps 0.10s is three corroborating frames — the floor below
+        # which one misclassified landmark frame becomes a command.
+        self.pane = PoseHold(arm=self.ARM, dwell=0.45)   # ~0.55s, on release
+        self.mission = PoseHold(arm=self.ARM, dwell=0.35)      # legacy
+        # The ONE dwell that does not get cut to taste. It was ~1s once, and a
+        # live headless session paused ITSELF: a relaxed hand with middle and
+        # ring drooping reads as ILY, and a second of that is easy to produce
+        # by accident. 1.65s -> 1.20s is a real improvement; going back under
+        # a second would be re-running an experiment that already failed.
+        # Pause is also the highest-stakes command here — everything stops,
+        # and the only tell is one chime.
+        self.toggle = PoseHold(arm=self.ARM, dwell=1.1, fire_on_fill=True)
+        # Thumbs-up is the pose nearest a resting hand (a slack hand with the
+        # thumb out), so the mic keeps a little more dwell than paste/Enter.
+        self.dictate = PoseHold(arm=self.ARM, dwell=0.30, fire_on_fill=True)
+        self.copy = PoseHold(arm=self.ARM, dwell=0.35)         # legacy
+        self.paste = PoseHold(arm=self.ARM, dwell=0.20, fire_on_fill=True)
+        self.enter = PoseHold(arm=self.ARM, dwell=0.20, fire_on_fill=True)
         self._dictating = False
         self._dragging = False                  # free-hand fist holds the button
         self._drag_since: Optional[float] = None

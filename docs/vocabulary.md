@@ -14,11 +14,11 @@ the screen to feed an agent.
 
 | Pose | Hold | Action |
 |---|---|---|
-| thumbs-up | ~0.6s | **mic** ON (chime); thumbs-up again = OFF |
+| thumbs-up | ~0.4s | **mic** ON (chime); thumbs-up again = OFF |
 | ILY on your **other** hand | ~0.3s | **Enter** — submit what you dictated |
-| V sign (peace) | ~0.6s | **Cmd+V** (paste) |
-| frame a rectangle with both hands | ~0.8s | **frame shot** — that region to the clipboard |
-| ILY on your **cursor** hand | ~1.5s | **pause / resume** everything (chime says which way) |
+| V sign (peace) | ~0.3s | **Cmd+V** (paste) |
+| frame a rectangle with both hands | ~0.55s | **frame shot** — that region to the clipboard |
+| ILY on your **cursor** hand | ~1.2s | **pause / resume** everything (chime says which way) |
 
 Either hand fires the mic, the paste and the frame shot. **ILY is the one
 pose whose meaning depends on which hand makes it** — the configured `--hand`
@@ -81,7 +81,7 @@ hand out of frame the way cut-style swipes did:
 | frame a rectangle with both hands (thumb+index L-shapes) | ~0.8s | **FRAME SHOT** — screenshot of the framed region to the clipboard (`--pane window/tab`) |
 | OK sign (pinch, 3 fingers up) | ~0.6s | Mission Control |
 | ILY sign (thumb+index+pinky) | ~1.5s | pause / resume all gesture control (fires on ring-fill, with a chime) |
-| thumbs-up | ~0.6s | **DICTATE** toggle — mic ON (Tink), thumbs-up again = OFF (Pop). Holds the Option key in between; rebind your dictation app (Willow Voice etc.) to a bare Option hold. Your hand is free while dictating. ILY pause also closes the mic; a 3-minute watchdog is the backstop |
+| thumbs-up | ~0.4s | **DICTATE** toggle — mic ON (Tink), thumbs-up again = OFF (Pop). Holds the Option key in between; rebind your dictation app (Willow Voice etc.) to a bare Option hold. Your hand is free while dictating. ILY pause also closes the mic; a 3-minute watchdog is the backstop |
 
 While you hold the frame pose, the framed region is highlighted on the actual
 screen, Cmd+Shift+4-style — amber while the dwell fills, green when releasing

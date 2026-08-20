@@ -867,3 +867,120 @@ def test_the_shadow_expires_so_normal_use_resumes():
         t += FRAME_US
         engine.on_snapshot(Snapshot(left=frame("Left", t, OPEN)))
     assert [e.command for e in fired] == [Command.PASTE]
+
+
+# --- paste is snappy ---------------------------------------------------------
+
+def test_paste_fires_while_the_pose_is_still_held():
+    """From live use: paste "waits as long as the pause". It was fire-on-
+    RELEASE, so the cost was the fill, plus breaking the pose, plus the
+    flicker grace. It now commits the moment the ring fills."""
+    engine = minimal()
+    fired = []
+    engine.subscribe(lambda e: fired.append(e))
+    t = 0
+    while t / 1e6 < 0.50:                       # held, never released
+        t += FRAME_US
+        engine.on_snapshot(Snapshot(left=frame("Left", t, V_POSE)))
+    assert [e.command for e in fired] == [Command.PASTE]
+
+
+def test_paste_lands_in_under_half_a_second():
+    engine = minimal()
+    fired = []
+    engine.subscribe(lambda e: fired.append(e))
+    t = 0
+    while t / 1e6 < 1.0 and not fired:
+        t += FRAME_US
+        engine.on_snapshot(Snapshot(left=frame("Left", t, V_POSE)))
+    assert fired, "paste never fired"
+    budget = engine.ARM + engine.paste.dwell + 2 * (FRAME_US / 1e6)
+    assert t / 1e6 <= budget, f"paste took {t / 1e6:.2f}s, budget {budget:.2f}s"
+
+
+def test_paste_still_needs_more_than_a_flicker():
+    """arm stays: a single stray frame of V must not paste."""
+    engine = minimal()
+    fired = []
+    engine.subscribe(lambda e: fired.append(e))
+    t = 0
+    for _ in range(3):                          # ~0.1s, under the arm
+        t += FRAME_US
+        engine.on_snapshot(Snapshot(left=frame("Left", t, V_POSE)))
+    for _ in range(10):
+        t += FRAME_US
+        engine.on_snapshot(Snapshot(left=frame("Left", t, OPEN)))
+    assert [e.command for e in fired] == []
+
+
+def test_paste_fires_only_once_per_hold():
+    """fire_on_fill must not repeat every frame while the hand stays up."""
+    engine = minimal()
+    fired = []
+    engine.subscribe(lambda e: fired.append(e))
+    t = 0
+    while t / 1e6 < 2.5:
+        t += FRAME_US
+        engine.on_snapshot(Snapshot(left=frame("Left", t, V_POSE)))
+    assert [e.command for e in fired] == [Command.PASTE]
+
+
+def test_every_shipped_gesture_lands_fast():
+    """The whole vocabulary, timed, as a table — if one regresses this says
+    which. Budgets carry a one-frame allowance: a ring that fills at 0.30s
+    fires on the next 33ms sample, so 0.33s is on time, not late.
+
+    For the frame shot the measured quantity is the RELEASE latency, not the
+    total: how long you compose is your business, and only the tail after you
+    break the pose is the tool's cost."""
+    FRAME_S = FRAME_US / 1e6
+    budgets = {"paste": 0.30, "enter": 0.30, "mic": 0.40,
+               "frame shot release": 0.25}
+    got = {}
+
+    for name, pose, side in (("paste", V_POSE, "Left"),
+                             ("enter", ILY, "Left"),
+                             ("mic", THUMBS_UP, "Left")):
+        e = minimal()
+        fired = []
+        e.subscribe(lambda ev: fired.append(ev))
+        t = 0
+        while t / 1e6 < 2.0 and not fired:
+            t += FRAME_US
+            e.on_snapshot(Snapshot(**{side.lower(): frame(side, t, pose)}))
+        assert fired, f"{name} never fired"
+        got[name] = t / 1e6
+
+    e = minimal()
+    fired = []
+    e.subscribe(lambda ev: fired.append(ev))
+    L, R = Vec3(-80.0, 260.0, 0.0), Vec3(80.0, 380.0, 0.0)
+    t = 0
+    while t / 1e6 < 0.8:
+        t += FRAME_US
+        e.on_snapshot(both_hands(t, L, R))
+    released_at = t
+    while t / 1e6 < 2.5 and not fired:
+        t += FRAME_US
+        e.on_snapshot(Snapshot(left=frame("Left", t, OPEN),
+                               right=frame("Right", t, OPEN)))
+    assert fired, "frame shot never fired"
+    got["frame shot release"] = (t - released_at) / 1e6
+
+    slow = {k: f"{v:.2f}s > {budgets[k] + 2 * FRAME_S:.2f}s"
+            for k, v in got.items() if v > budgets[k] + 2 * FRAME_S}
+    assert not slow, slow
+
+
+def test_the_pause_stays_deliberate():
+    """The one dwell that is NOT cut to taste: at ~1s a live session paused
+    itself off a relaxed hand reading as ILY. Snappier, but not back there."""
+    engine = minimal()
+    assert engine.toggle.dwell >= 1.0, "pause is back in the range that failed"
+    fired = []
+    engine.subscribe(lambda e: fired.append(e))
+    t = 0
+    while t / 1e6 < 0.9:                        # a second of accidental ILY
+        t += FRAME_US
+        engine.on_snapshot(Snapshot(right=frame("Right", t, ILY)))
+    assert [e for e in fired if e.command is Command.TOGGLE] == []

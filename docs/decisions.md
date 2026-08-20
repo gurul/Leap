@@ -211,6 +211,48 @@ aside entirely); `FRAME_SHADOW_S = 0.0` disables the shadow.
 
 ---
 
+## 2026-08-20 — every dwell cut, except the one that already failed
+
+**What.** The whole vocabulary got faster, and three commands moved from
+fire-on-RELEASE to fire-on-FILL.
+
+| | before | now |
+|---|---|---|
+| arm (flicker guard, all poses) | 0.15 s | 0.10 s |
+| paste (V) | 0.45 s + release + grace | **0.20 s, fires while held** |
+| Enter (ILY) | 0.30 s, on fill | 0.20 s |
+| mic (thumbs-up) | 0.45 s | 0.30 s |
+| frame shot | 0.65 s + release | 0.45 s + release |
+| **pause (ILY)** | 1.5 s | **1.1 s** |
+
+Measured end to end, first matching frame to fired: paste and Enter **0.36 s**,
+mic **0.46 s**, frame-shot release tail **0.19 s**.
+
+**Why.** *"make all gestures snappy, as snappy as possible. So we can have a
+really fast, smooth workflow."* Every dwell here was sized when a stray pose
+could hijack a **cursor**. It cannot any more: there is no pointer, the frame
+shadow gives a composition exclusive ownership of the input, and every
+remaining command is cheap to undo. The release-commit in particular was
+buying an abort window that only mattered while a cursor was at stake — paste
+was paying the fill, plus breaking the pose, plus the 0.12 s flicker grace.
+
+**What did NOT get cut, and why.** The pause. It was ~1 s once and a live
+headless session **paused itself** — a relaxed hand with middle and ring
+drooping reads as ILY. 1.5 → 1.1 s is a real improvement; under a second would
+be re-running an experiment that already failed. It is also the highest-stakes
+command here: everything stops and the only tell is one chime. `arm` also
+stays non-zero at 0.10 s — three frames at 30fps, the floor below which one
+misclassified landmark frame becomes a command.
+
+**Note on feel.** At 30 fps every dwell carries ~66 ms of quantisation: the
+frame that first matches is the frame that arms, and the fill lands on the
+sample after that. A 0.30 s budget is a 0.36 s experience.
+
+**Reverse it if.** Commands start firing that you did not mean — the mic is
+the one to watch, since thumbs-up is the pose nearest a relaxed hand.
+
+---
+
 ## 2026-08-20 — "off" must mean off
 
 **What.** `leapctl off` now sweeps three process patterns instead of one:
