@@ -1,6 +1,6 @@
 # Leap
 
-![Leap — hand gestures for the things a mouse cannot do](docs/assets/hero.png)
+![Leap — two hands framing a region of the screen to capture it](docs/assets/hero.png)
 
 **Five hand gestures, from your webcam, for the things a mouse cannot do while
 your hands are somewhere else.** Open the mic and dictate, submit, paste, and
