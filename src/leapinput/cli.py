@@ -271,6 +271,12 @@ def main(argv=None) -> int:
                          "to MORE than the screen, so edges land inside the "
                          "comfortable envelope at the cost of magnifying "
                          "everything by 1/(1-2*inset)")
+    ap.add_argument("--legacy", action="store_true",
+                    help="bring back the full pre-2026-08-20 tool: the hand "
+                         "drives the CURSOR (point/pinch/drag/lift) and the "
+                         "whole command vocabulary (copy, Mission Control, "
+                         "fist-drag, ILY pause). Off by default — the shipped "
+                         "tool is four gestures: mic, Enter, paste, frame shot")
     ap.add_argument("--pinch-drag", action="store_true",
                     help="let a held pinch drag (off by default: the cursor is "
                          "pinned for the whole hold, so a pinch can only ever "
@@ -409,7 +415,20 @@ def main(argv=None) -> int:
         mapping.pinch_drag = True
     engine = GestureEngine(gesture_cfg)
     direct = DirectDriver(backend, mapping)
-    engine.subscribe(direct.on_intent)
+    # THE strip, in one line. Without this subscription no Intent ever reaches
+    # the cursor: no pointer motion, no mouse buttons, no clutch, no drag. The
+    # engine still runs (telemetry and the command layer read its state), and
+    # every module above is intact — `--legacy` re-subscribes it. A mouse does
+    # pointing better; this tool is for the four things a mouse cannot do
+    # while your hands are somewhere else.
+    if args.legacy:
+        engine.subscribe(direct.on_intent)
+    elif hasattr(source, "detect_interval_us"):
+        # Nothing consumes per-frame POSITION any more, so stop paying for it.
+        # 20 Hz: still half the work, and it keeps the shortest dwell (Enter,
+        # 0.3s) at ~6 frames rather than the ~3 a 15Hz budget actually
+        # delivered once detection time was added on top.
+        source.detect_interval_us = int(1e6 / 20)
 
     command_engine = None
     screen_overlay = None
@@ -417,7 +436,8 @@ def main(argv=None) -> int:
     if commands_on:
         from .commands import CommandEngine
         command_engine = CommandEngine(hand=args.hand,
-                                       pinch_on_mm=gesture_cfg.pinch_on_mm)
+                                       pinch_on_mm=gesture_cfg.pinch_on_mm,
+                                       minimal=not args.legacy)
         grab_session = None
         if args.pane == "grab":
             from .grab import GrabSession
@@ -430,9 +450,10 @@ def main(argv=None) -> int:
         shortcuts = ShortcutDriver(backend, pane_action=args.pane,
                                    grab_session=grab_session)
         command_engine.subscribe(shortcuts.on_command)
-        # DRAG is a mouse command: the cursor driver owns the button, so it
-        # subscribes too. Ordering is irrelevant — they handle disjoint sets.
-        command_engine.subscribe(direct.on_command)
+        if args.legacy:
+            # DRAG is a mouse command: the cursor driver owns the button, so
+            # it subscribes too. Disjoint sets, so ordering is irrelevant.
+            command_engine.subscribe(direct.on_command)
         # Keep the pose state machine honest when the dictation watchdog
         # force-releases Option behind its back (plain attribute assignment:
         # harmless if the driver never fires it).
@@ -589,7 +610,26 @@ def main(argv=None) -> int:
 
     w, h = backend.screen
     print(f"screen {w:.0f}x{h:.0f} | backend={args.backend} | hand={args.hand}")
-    if args.backend == "quartz":
+    if not args.legacy:
+        pane_label = {"screenshot": "screenshot that region -> clipboard",
+                      "window": "new window there",
+                      "tab": "new tab there",
+                      "grab": "file a change request (grab mode)"}[args.pane]
+        print("\n  HANDS OFF THE CURSOR — your mouse still owns the pointer.")
+        print("  Four gestures. Hold each until the ring fills, then release:")
+        print(f"    {'thumbs-up'.ljust(35)}= mic ON (chime); "
+              "thumbs-up again = mic OFF")
+        print(f"    {'ILY on your other hand'.ljust(35)}= Enter")
+        print(f"    {'V sign (peace)'.ljust(35)}= Cmd+V (paste)")
+        print(f"    {'frame a rectangle with both hands'.ljust(35)}= {pane_label}")
+        print(f"    {('ILY on your ' + args.hand.lower() + ' hand ~1.5s').ljust(35)}"
+              f"= pause / resume (chime)")
+        print("  Either hand fires the mic, paste and the frame shot; ILY is "
+              "the one\n  pose that differs by hand — "
+              f"{args.hand.lower()} pauses, the other submits.")
+        print("  The cursor, clicking and the old vocabulary are still in "
+              "there: --legacy")
+    elif args.backend == "quartz":
         print("\n  *** DRIVING THE REAL CURSOR ***")
         print("  Drop your hand to the desk to release it — the device stops")
         print("  tracking entirely, so that is a hard disengage, not a threshold.")
@@ -616,7 +656,7 @@ def main(argv=None) -> int:
             free = "left" if args.hand == "Right" else "right"
             print("  commands (hold the pose until the ring fills, then release):")
             print(f"  {args.hand.lower()} (cursor) hand:")
-            print(f"    frame a rectangle with both hands  = {pane_label}")
+            print(f"    {'frame a rectangle with both hands'.ljust(35)}= {pane_label}")
             print("    OK sign (pinch, 3 fingers up)      = Mission Control")
             print("    ILY sign (thumb+index+pinky) 1.5s  = pause / resume"
                   " (fires as the ring fills)")

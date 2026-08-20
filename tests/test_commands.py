@@ -600,3 +600,106 @@ def test_the_free_hand_fist_does_not_fire_copy_paste_or_enter():
     """A fist must be unambiguous against the other free-hand poses."""
     f = frame("Left", 0, (False,) * 5)
     assert not is_pinch_hold(f, 50.0) and not is_v_pose(f) and not is_ily_pose(f)
+
+
+# --- minimal mode: four gestures, nothing else -------------------------------
+
+def minimal() -> CommandEngine:
+    return CommandEngine(hand="Right", minimal=True)
+
+
+def fired_for(engine, pose, side="Left", hold_s=0.9):
+    return hold_release(engine, lambda t: Snapshot(**{side.lower(): frame(side, t, pose)}),
+                        hold_s=hold_s, release_side=side)
+
+
+def test_minimal_keeps_the_four():
+    """mic, Enter, paste, frame shot — the whole shipped vocabulary."""
+    assert [e.command for e in fired_for(minimal(), ILY)] == [Command.ENTER]
+    assert [e.command for e in fired_for(minimal(), V_POSE)] == [Command.PASTE]
+    assert [e.command for e in fired_for(minimal(), THUMBS_UP)] == [Command.DICTATE]
+
+    engine = minimal()
+    fired = hold_release(engine, lambda t: both_hands(t, Vec3(-80.0, 260.0, 0.0),
+                                                      Vec3(80.0, 380.0, 0.0)),
+                         hold_s=1.0, release_side="Both")
+    assert [e.command for e in fired] == [Command.NEW_PANE]
+
+
+def test_minimal_drops_everything_else():
+    """Mission Control, copy, the fist drag and the ILY pause are unwired —
+    the poses can be made and nothing happens."""
+    ok_pose = (False, True, True, True, True)
+    assert fired_for(minimal(), ok_pose) == []                  # no MISSION
+    engine = minimal()
+    assert drag_events(engine, [fist_snap(t * FRAME_US) for t in range(1, 20)]) == []
+
+    # COPY needs a pinch-hold; minimal must not fire it (Cmd+C is React Grab's)
+    engine = minimal()
+    fired = hold_release(
+        engine,
+        lambda t: Snapshot(left=frame("Left", t, (False, True, True, True, True),
+                                      pinch=20.0)),
+        hold_s=0.9, release_side="Left")
+    assert [e for e in fired if e.command is Command.COPY] == []
+
+    # The fist is unbound in minimal: no drag, and no pause either (ILY keeps
+    # the pause, so the fist is free rather than doubling up).
+    engine = minimal()
+    assert drag_events(engine, [fist_snap(t * FRAME_US) for t in range(1, 40)]) == []
+
+
+def test_minimal_keeps_the_ily_pause_on_the_cursor_hand():
+    """Pause survives the strip unchanged: ILY on the configured hand toggles,
+    ILY on the other submits. The one pose whose meaning is hand-dependent."""
+    engine = minimal()
+    fired = []
+    engine.subscribe(lambda e: fired.append(e))
+    t = 0
+    while t / 1e6 < 2.2:                        # past the long pause dwell
+        t += FRAME_US
+        engine.on_snapshot(Snapshot(right=frame("Right", t, ILY)))
+    assert [(e.command, e.data.get("enabled")) for e in fired] \
+        == [(Command.TOGGLE, False)]
+    assert engine.enabled is False
+
+    # ...and it is still the way back in while disabled.
+    while t / 1e6 < 3.0:                        # let the pose drop first
+        t += FRAME_US
+        engine.on_snapshot(Snapshot(right=frame("Right", t, OPEN)))
+    while t / 1e6 < 5.5:
+        t += FRAME_US
+        engine.on_snapshot(Snapshot(right=frame("Right", t, ILY)))
+    assert engine.enabled is True
+
+
+def test_minimal_ily_on_the_free_hand_is_still_enter():
+    engine = minimal()
+    assert [e.command for e in fired_for(engine, ILY, side="Left")] \
+        == [Command.ENTER]
+    assert engine.enabled is True               # never paused
+
+
+def test_minimal_pause_silences_the_other_three():
+    engine = minimal()
+    engine.enabled = False
+    assert [e.command for e in fired_for(engine, V_POSE)] == []
+    assert [e.command for e in fired_for(engine, THUMBS_UP)] == []
+
+
+def test_minimal_fires_from_either_hand():
+    """Everything except ILY answers to whichever hand is up."""
+    for side in ("Left", "Right"):
+        assert [e.command for e in fired_for(minimal(), V_POSE, side=side)] \
+            == [Command.PASTE]
+        assert [e.command for e in fired_for(minimal(), THUMBS_UP, side=side)] \
+            == [Command.DICTATE]
+
+
+def test_legacy_still_has_the_whole_vocabulary():
+    """Nothing was deleted — --legacy must restore it exactly."""
+    engine = CommandEngine(hand="Right")            # minimal=False
+    assert [e.command for e in fired_for(engine, V_POSE)] == [Command.PASTE]
+    engine = CommandEngine(hand="Right")
+    assert drag_events(engine, [fist_snap(t * FRAME_US) for t in range(1, 20)]) \
+        == [(Command.DRAG, True)]

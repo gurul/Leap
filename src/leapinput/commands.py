@@ -195,6 +195,20 @@ def is_thumbs_up(f: HandFrame) -> bool:
     return f.extended == (True, False, False, False, False)
 
 
+def other_hand(snap: Snapshot, hand: str) -> Optional[HandFrame]:
+    """The hand that is not `hand`."""
+    return snap.left if hand == "Right" else snap.right
+
+
+def _either(snap: Snapshot, test) -> Optional[HandFrame]:
+    """The first hand matching `test`, whichever side it is on. Minimal mode
+    has no cursor hand, so a pose means the same thing on both."""
+    for f in (snap.right, snap.left):
+        if f is not None and test(f):
+            return f
+    return None
+
+
 def is_fist(f: HandFrame) -> bool:
     """Every finger curled. The cleanest pose on this hardware — the corpus
     read 0 extended on 541/542 fist frames — which is why it can be trusted as
@@ -261,7 +275,17 @@ class CommandEngine:
     DRAG_ARM_S = 0.18
 
     def __init__(self, hand: str = "Right", pinch_on_mm: float = 50.0,
-                 clock: Callable[[], float] = time.monotonic):
+                 clock: Callable[[], float] = time.monotonic,
+                 minimal: bool = False):
+        # minimal (the default the CLI ships, 2026-08-20): three gestures —
+        # mic, Enter, frame shot — and nothing else. The rest of the
+        # vocabulary is not deleted, only unwired; `--legacy` restores it.
+        # Everything cut here served CURSOR work, which a mouse does better:
+        # copy/paste, Mission Control, the fist drag, and the ILY pause (the
+        # menu bar is a more reliable off switch than a pose). Dropping the
+        # pause also lets ILY mean Enter on EITHER hand, which retires the
+        # hand-routing rules that were a bug class of their own.
+        self.minimal = minimal
         self.hand = hand
         self.pinch_on_mm = pinch_on_mm
         self._clock = clock
@@ -390,9 +414,15 @@ class CommandEngine:
         # ring stay curled, refreshing the shadow), and the pause arming
         # mid-drag blanks the cursor engine via `busy` and drops the drag.
         # Disabled needs no gate — there is nothing held to protect.
-        ily = (mine is not None and is_ily_pose(mine)
-               and (not self.enabled or not pinch_shadow))
-        if self.toggle.update(ily, now, present=mine is not None):
+        # PAUSE. Legacy keeps ILY on the cursor hand. Minimal moves it to a
+        # held FIST, on either hand: ILY had to become Enter (there is no
+        # cursor hand left to distinguish the two), and the fist is the
+        # cleanest pose on this hardware — 0 extended on 541/542 corpus frames
+        # — which is what a toggle nobody is watching needs. It is also the
+        # only pose minimal mode does not otherwise use.
+        paused_pose = (mine is not None and is_ily_pose(mine)
+                       and (not self.enabled or not pinch_shadow))
+        if self.toggle.update(paused_pose, now, present=mine is not None):
             self.enabled = not self.enabled
             self._emit(Command.TOGGLE, enabled=self.enabled)
 
@@ -431,31 +461,57 @@ class CommandEngine:
 
         # MISSION: the OK pose, one hand, never while framing or in the
         # shadow of a click-pinch it could be opening out of.
-        ok = (not framing and not pinch_shadow and mine is not None
-              and is_ok_pose(mine, self.pinch_on_mm))
-        if self.mission.update(ok, now, present=mine is not None):
-            self._emit(Command.MISSION_CONTROL)
+        if not self.minimal:
+            ok = (not framing and not pinch_shadow and mine is not None
+                  and is_ok_pose(mine, self.pinch_on_mm))
+            if self.mission.update(ok, now, present=mine is not None):
+                self._emit(Command.MISSION_CONTROL)
 
-        # DICTATE: thumbs-up on the cursor hand, a TOGGLE. One short
+        # DICTATE: thumbs-up, a TOGGLE. One short
         # thumbs-up opens the mic; between toggles the hand is entirely free
         # — rest it, point, leave the frame — nothing here closes the mic
         # except another thumbs-up, the ILY pause, or the driver's watchdog.
         # The driver holds the dictation hotkey while _dictating is true.
-        thumb = (not framing and not fist_shadow and mine is not None
-                 and is_thumbs_up(mine))
-        if self.dictate.update(thumb, now, present=mine is not None):
+        # Minimal mode has no cursor hand, so the mic answers to EITHER hand
+        # — one less thing to get right while holding a phone-sized idea.
+        # `present` is "a hand is being tracked", NEVER "the pose is showing".
+        # PoseHold treats absence as a tracking loss that CANCELS, and a
+        # deliberate release as a fire — conflating them means the hold can
+        # never complete.
+        seen = snap.left is not None or snap.right is not None
+        thumb = (not framing and not fist_shadow
+                 and (_either(snap, is_thumbs_up) is not None if self.minimal
+                      else (mine is not None and is_thumbs_up(mine))))
+        if self.dictate.update(thumb, now,
+                               present=seen if self.minimal
+                               else mine is not None):
             self._dictating = not self._dictating
             self._emit(Command.DICTATE, active=self._dictating)
 
-        # COPY / PASTE: poses on the free hand — the one the cursor ignores.
+        # PASTE and ENTER. In minimal mode either hand fires them: with no
+        # cursor there is no "free" hand to be free OF, and the whole
+        # lone-hand adoption ruleset existed to protect a cursor that no
+        # longer moves. COPY stays behind --legacy: Cmd+C is React Grab's
+        # trigger, and firing it from a resting pinch would grab components
+        # nobody asked for.
         other = snap.left if self.hand == "Right" else snap.right
-        copying = (not framing and other is not None
-                   and is_pinch_hold(other, self.pinch_on_mm))
-        if self.copy.update(copying, now, present=other is not None):
-            self._emit(Command.COPY)
-        pasting = (not framing and other is not None and is_v_pose(other))
-        if self.paste.update(pasting, now, present=other is not None):
+        if not self.minimal:
+            copying = (not framing and other is not None
+                       and is_pinch_hold(other, self.pinch_on_mm))
+            if self.copy.update(copying, now, present=other is not None):
+                self._emit(Command.COPY)
+        pasting = (not framing
+                   and (_either(snap, is_v_pose) is not None if self.minimal
+                        else (other is not None and is_v_pose(other))))
+        if self.paste.update(pasting, now,
+                             present=seen if self.minimal
+                             else other is not None):
             self._emit(Command.PASTE)
+        # ILY is the one pose whose MEANING depends on which hand makes it —
+        # cursor hand pauses, free hand submits — so it keeps the hand routing
+        # in both modes. Everything else in minimal answers to either hand;
+        # this one cannot, and splitting it is what pays for having a pause at
+        # all without spending a second pose on it.
         entering = (not framing and other is not None and is_ily_pose(other))
         if self.enter.update(entering, now, present=other is not None):
             self._emit(Command.ENTER)
@@ -472,7 +528,8 @@ class CommandEngine:
         # NEVER GATED — an opened hand, a vanished hand and a disabled engine
         # all drop the button on the same frame, because a stuck mouse button
         # is the worst failure this project has.
-        fisted = (not framing and other is not None and is_fist(other))
+        fisted = (not self.minimal and not framing and other is not None
+                  and is_fist(other))
         if not fisted:
             self._drag_since = None
             if self._dragging:

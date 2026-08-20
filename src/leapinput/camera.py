@@ -765,6 +765,11 @@ class CameraSource:
                              min_presence_confidence,
                              min_tracking_confidence)
         self._subscribers: list[Callable[[Snapshot], None]] = []
+        # Detection budget: 0 = every frame (pointing). Set to a rate by the
+        # CLI when only pose HOLDS are wired, where 33ms of dwell resolution
+        # is worth a core. See the skip in _run.
+        self.detect_interval_us = 0
+        self._last_detect_us = 0
         self._lock = threading.Lock()
         # Last wrist position per side (normalized image coords + t_us), the
         # continuity signal lone_hand_side uses to tell a label flap from the
@@ -996,6 +1001,23 @@ class CameraSource:
             # of a growing delay.
             if not self.stats["realtime"]:
                 cap.grab()
+            # Detection budget. Pointing needs every frame — the cursor is a
+            # position and 33ms of staleness is visible. Pose HOLDS do not:
+            # they are 0.6-1.5s dwells clocked in wall time, so halving the
+            # detection rate costs 33ms of dwell resolution and gives back a
+            # whole core. Frames are still READ and dropped, so the camera
+            # buffer never backs up and latency does not grow.
+            if self.detect_interval_us and self._last_detect_us:
+                waited = time.monotonic_ns() // 1_000 - self._last_detect_us
+                if waited < self.detect_interval_us:
+                    cap.grab()              # keep the stream current, skip work
+                    # Sleep the REMAINDER, not a fixed tick: a fixed sleep per
+                    # skipped frame is its own overhead, and it was costing
+                    # more rate than the budget itself (measured 9.2fps against
+                    # a 15Hz target).
+                    time.sleep(min(0.02,
+                                   (self.detect_interval_us - waited) / 1e6))
+                    continue
             ok, bgr = cap.read()
             # Timestamp CAPTURE, not the end of flip+convert: downstream dwells
             # and velocities should measure when the hand moved, not how long
@@ -1044,6 +1066,7 @@ class CameraSource:
                                      if fps else 1e6 / interval)
                 frame_budget_us = interval
             prev_capture_us = now_us
+            self._last_detect_us = now_us
             if self._mirror:
                 bgr = cv2.flip(bgr, 1)
             rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)

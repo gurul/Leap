@@ -1,5 +1,36 @@
 # The gesture vocabulary
 
+## What this is now (2026-08-20)
+
+Five gestures, and **the hand never touches the cursor**. A mouse does
+pointing better; this exists for the things a mouse cannot do while your hands
+are somewhere else — dictating, submitting, pasting, and grabbing a region of
+the screen to feed an agent.
+
+| Pose | Hold | Action |
+|---|---|---|
+| thumbs-up | ~0.6s | **mic** ON (chime); thumbs-up again = OFF |
+| ILY on your **other** hand | ~0.3s | **Enter** — submit what you dictated |
+| V sign (peace) | ~0.6s | **Cmd+V** (paste) |
+| frame a rectangle with both hands | ~0.8s | **frame shot** — that region to the clipboard |
+| ILY on your **cursor** hand | ~1.5s | **pause / resume** everything (chime says which way) |
+
+Either hand fires the mic, the paste and the frame shot. **ILY is the one
+pose whose meaning depends on which hand makes it** — the configured `--hand`
+pauses, the other submits — which is what buys a pause without spending a
+second pose on it.
+
+Nothing was deleted. The cursor, clicking, dragging, copy and Mission Control
+are all still in the tree and one flag away:
+
+```bash
+leapinput --legacy        # the full pre-strip tool, exactly as it was
+```
+
+Everything below this line describes `--legacy`.
+
+---
+
 ## Cursor control
 
 | Pose | Action |

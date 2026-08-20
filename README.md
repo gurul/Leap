@@ -2,10 +2,18 @@
 
 ![Leap — your webcam is a hand-tracking input device for your Mac](docs/assets/hero.png)
 
-**Your webcam is a hand-tracking input device for your Mac.** Point to move
-the cursor, pinch to click, make a fist to drag — the built-in camera is the
-daily driver, with no setup and no special hardware anywhere. Any faster
-camera slots in, including your iPhone over WebRTC as a built-in 60 fps mode.
+**Your webcam is a hand-tracking input device for your Mac** — for the things
+a mouse cannot do while your hands are somewhere else. Thumbs-up opens the
+mic, ILY submits, a peace sign pastes, and framing a rectangle with both hands
+screenshots that region to the clipboard. The built-in camera is the daily
+driver, with no setup and no special hardware anywhere; any faster camera
+slots in, including your iPhone over WebRTC as a built-in 60 fps mode.
+
+The hand deliberately does **not** drive the cursor. That was the original
+build and it is all still here behind `--legacy`, but a mouse points better,
+and every hard problem in this repo — projection drift, phantom clicks,
+transition jitter — lived in the pointing path. What is left is the part that
+earns its keep.
 
 Touchless mice are a graveyard of demos that feel magical for ten seconds and
 unusable for ten minutes. Leap is an attempt to find out why, and to fix it
@@ -53,32 +61,38 @@ listens on the LAN unless you ask. **Use phone camera** is the explicit
 opt-in: it starts (or switches to) the WebRTC source and copies the stream
 URL to the clipboard for the phone to open.
 
-The ILY pose (or `leapctl pause`) pauses and resumes gesture control in-band.
+ILY on your cursor hand (or `leapctl pause`) pauses and resumes in-band.
 
 Accuracy is measured, not felt: every session serves a scored bench at
-`http://127.0.0.1:8788/bench` — a target ladder for clicking and a draw-this
-rectangle for framing, with the live mapping printed beside the score. See
-[docs/troubleshooting.md](docs/troubleshooting.md).
+`http://127.0.0.1:8788/bench` — a draw-this-rectangle test for framing, and a
+target ladder for `--legacy` clicking, with the live mapping printed beside
+the score. See [docs/troubleshooting.md](docs/troubleshooting.md).
 
 ## The vocabulary
 
+**The hand does not drive the cursor.** Your mouse does that better. This is
+for the things a mouse cannot do while your hands are somewhere else:
+
 | Pose | Action |
 |---|---|
-| point (1–3 fingers) | cursor moves — slow hand = precision mode for tiny targets |
-| pinch | click / drag (two quick pinches = real double-click) |
-| open hand (4–5 fingers) | LIFT — cursor parked, reposition freely |
-| hand out of view | disengaged, everything released |
+| thumbs-up | mic ON (chime); thumbs-up again = OFF |
+| ILY on your other hand | Enter — submit what you dictated |
+| V sign (peace) | Cmd+V |
+| frame a rectangle with both hands | screenshot that region → clipboard |
+| ILY on your cursor hand | pause / resume everything |
 
-Plus pose-hold commands (screenshot a hand-framed region, Mission Control,
-dictation toggle, pause) and a free-hand palette (copy/paste/Enter) — the
-full tables, the routing guards, and the corpus verification are in
-[docs/vocabulary.md](docs/vocabulary.md).
+Either hand fires the mic, paste and frame shot; ILY is the one pose that
+differs by hand. `--legacy` brings back the full cursor-driving tool —
+pointing, clicking, dragging, copy, Mission Control — unchanged.
+
+The full tables, the routing guards, the corpus verification and the whole
+`--legacy` vocabulary are in [docs/vocabulary.md](docs/vocabulary.md).
 
 ## Why it holds up
 
 - **Verified against a corpus, not a demo.** 3,639 recorded frames of real
   use replay through the pipeline in CI; each pose does exactly one thing.
-  297 hardware-free tests run in under five seconds.
+  328 hardware-free tests run in under six seconds.
 - **Designed to fail safe.** Dry-run by default; a separate guard process
   releases every button if the main process dies — even to `SIGKILL`; every
   tracking-loss, stall, and crash path reaches the same release.
