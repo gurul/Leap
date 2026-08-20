@@ -13,6 +13,7 @@ dependencies = [
 [project.scripts]
 leapinput = "leapinput.cli:main"
 leapinput-menubar = "leapinput.menubar:main"
+leapinput-grab = "leapinput.grab:main"
 
 [project.optional-dependencies]
 dev = ["pytest"]

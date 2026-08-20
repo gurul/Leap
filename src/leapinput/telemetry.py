@@ -112,6 +112,24 @@ class Telemetry:
         except Exception:
             pass
 
+    def on_command(self, ev) -> None:
+        """Discrete commands (the pane rect above all) into the same stream.
+
+        The bench scores the framing gesture by comparing the rect the engine
+        committed against the rect it was asked to frame, so the rect has to
+        leave the process the moment it fires — reading it back out of the
+        session log afterwards is not a measurement, it is archaeology.
+        """
+        try:
+            rect = (ev.data or {}).get("rect")
+            rec = {"type": "command", "command": ev.command.value,
+                   "rect": [round(v, 4) for v in rect] if rect else None,
+                   "wall": time.time()}
+            self.events.append(rec)
+            self._push(rec)
+        except Exception:
+            pass
+
     def _on_snapshot(self, snap: Snapshot) -> None:
         s = self._sample(snap)
         self.ring.append(s)
@@ -145,6 +163,13 @@ class Telemetry:
             self._open.append(inc)
             click = {"type": "click", "id": cid, "intent": ev.intent.value,
                      "wall": inc.wall}
+            if self.direct is not None:
+                # WHERE the click landed, sampled at the click rather than
+                # inferred from the nearest ring sample: the bench's whole
+                # measurement is target-minus-landing, and a frame of cursor
+                # travel is a sizeable fraction of the error being measured.
+                click["cx"] = round(self.direct.x, 1)
+                click["cy"] = round(self.direct.y, 1)
             self.events.append(click)
             self._push(click)
 
@@ -215,7 +240,37 @@ class Telemetry:
                     "clicks": self.clicks, "marks": self.marks,
                     "ring": list(self.ring)[-300:],
                     "events": list(self.events)[-40:],
+                    "screen": self.screen,
+                    "mapping": self.mapping_knobs(),
                     "log": str(self._path) if self._path else None}
+
+    @property
+    def screen(self) -> Optional[list]:
+        """Main-screen pixels, so the bench can put a normalized rect on it."""
+        if self.direct is None:
+            return None
+        return [getattr(self.direct, "w", None), getattr(self.direct, "h", None)]
+
+    def mapping_knobs(self) -> dict:
+        """The hand->screen knobs the bench displays next to its scores.
+
+        A number without the mapping that produced it cannot be compared
+        against the run before it — every one of these changed in the
+        2026-08-18/19 work that the accuracy complaints date from.
+        """
+        t = getattr(self.source, "_tuning", None)
+        m = getattr(self.direct, "map", None)
+        out: dict = {}
+        if t is not None:
+            zoom = getattr(t, "reach_zoom", None)
+            out.update(reach_center=getattr(t, "reach_center", None),
+                       reach_inset=getattr(t, "reach_inset", None),
+                       zoom=[round(v, 2) for v in zoom] if zoom else None)
+        if m is not None:
+            out.update(precision_gain_min=getattr(m, "precision_gain_min", None),
+                       precision_full_speed=getattr(m, "precision_full_speed",
+                                                    None))
+        return out
 
     def attach(self) -> queue.Queue:
         q: queue.Queue = queue.Queue(maxsize=CLIENT_QUEUE)
@@ -274,6 +329,8 @@ class TelemetryServer:
             def do_GET(self):               # noqa: N802 - stdlib name
                 if self.path == "/":
                     self._send(200, _PAGE)
+                elif self.path == "/bench":
+                    self._send(200, _BENCH)
                 elif self.path == "/state":
                     self._send(200, json.dumps(tele.state()),
                                "application/json")
@@ -434,6 +491,186 @@ fetch("/state").then(r=>r.json()).then(st=>{
   es.onerror=()=>{$("dot").className="";$("dot").innerHTML="&#9679; reconnecting";};
   es.onmessage=m=>ingest(JSON.parse(m.data));
   draw();
+});
+</script>
+"""
+
+
+# The bench is a SEPARATE page from the dashboard on purpose: the dashboard
+# answers "what did the hand do", which you read while working; the bench asks
+# you to perform a known task and scores the result. Only the second one can
+# answer "is this worse than it was", which is the question that matters when
+# a mapping change lands. Both feed off the same /events stream.
+_BENCH = """<!doctype html>
+<meta charset="utf-8">
+<title>leap bench</title>
+<style>
+  body{margin:0;background:#0d0f12;color:#d6d9de;font:13px/1.5 ui-monospace,Menlo,monospace}
+  header{display:flex;gap:16px;align-items:baseline;padding:9px 16px;border-bottom:1px solid #23262c;flex-wrap:wrap}
+  h1{font-size:14px;margin:0;color:#f5c518}
+  .stat b{color:#fff} .stat{color:#8b9098}
+  #dot{color:#e0533d} #dot.live{color:#5fae6e}
+  nav{margin-left:auto;display:flex;gap:8px}
+  button{font:inherit;color:#d6d9de;background:#1a1d23;border:1px solid #2e323a;border-radius:5px;padding:5px 11px;cursor:pointer}
+  button.on{background:#f5c518;color:#0d0f12;border-color:#f5c518;font-weight:bold}
+  #arena{position:relative;height:calc(100vh - 160px);margin:12px 16px;background:#111318;
+    border:1px solid #23262c;border-radius:6px;overflow:hidden;cursor:crosshair}
+  #target{position:absolute;border-radius:50%;background:#f5c518;box-shadow:0 0 0 6px rgba(245,197,24,.13)}
+  #trect{position:absolute;border:2px dashed #f5c518;border-radius:3px}
+  #grect{position:absolute;border:2px solid #5fae6e;border-radius:3px;background:rgba(95,174,110,.10)}
+  .dot{position:absolute;width:7px;height:7px;margin:-4px 0 0 -4px;border-radius:50%;background:#e0533d}
+  .dot.hit{background:#5fae6e}
+  #scores{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:0 16px}
+  .card{background:#111318;border:1px solid #23262c;border-radius:6px;padding:8px 11px}
+  .card .k{color:#6b7078;font-size:11px;text-transform:uppercase;letter-spacing:.06em}
+  .card .v{font-size:20px;color:#fff}
+  .hint{color:#6b7078;font-size:11px;margin:6px 16px 0}
+  #map{color:#6b7078;font-size:11px}
+</style>
+<header>
+  <h1>LEAP BENCH</h1>
+  <span class="stat" id="mode">click test</span>
+  <span class="stat" id="dot">&#9679; connecting</span>
+  <span class="stat" id="map"></span>
+  <nav>
+    <button id="bclick" class="on">CLICK test</button>
+    <button id="bframe">FRAME test</button>
+    <button id="breset">reset</button>
+  </nav>
+</header>
+<div id="scores"></div>
+<div id="arena"></div>
+<div class="hint" id="hint"></div>
+<script>
+const $=id=>document.getElementById(id);
+// Fixed ladder, never random: two runs are only comparable if they asked for
+// the same targets. Radii end at 7px - the macOS traffic-light button, the
+// target PRISM's precision layer exists to make reachable.
+const TARGETS=[[.25,.30,34],[.75,.30,34],[.50,.55,24],[.20,.75,24],[.80,.72,16],
+               [.50,.25,16],[.35,.60,11],[.65,.45,11],[.50,.80,7],[.28,.45,7]];
+const FRAMES=[[.20,.20,.60,.55],[.45,.15,.85,.50],[.15,.45,.55,.85],[.30,.35,.70,.75]];
+let mode="click",i=0,shots=[],frames=[],screenPx=null,pending=null;
+
+function arena(){return $("arena").getBoundingClientRect();}
+// Page CSS px -> screen-normalized, the space the session reports rects in.
+// screenY is the OUTER window top, so the content offset is the chrome height.
+function toScreenNorm(x,y){
+  const sw=(screenPx&&screenPx[0])||screen.width, sh=(screenPx&&screenPx[1])||screen.height;
+  const chrome=window.outerHeight-window.innerHeight;
+  return [(window.screenX+x)/sw,(window.screenY+chrome+y)/sh];
+}
+function fmt(n,d){return n==null?"-":(+n).toFixed(d===undefined?1:d);}
+function card(k,v,sub){return '<div class="card"><div class="k">'+k+'</div><div class="v">'+v+
+  '</div><div class="k">'+(sub||"")+'</div></div>';}
+
+function nextTarget(){
+  const a=arena(),t=TARGETS[i%TARGETS.length];
+  const x=t[0]*a.width,y=t[1]*a.height,r=t[2];
+  pending={x:x,y:y,r:r,at:performance.now()};
+  const el=$("target");
+  el.style.cssText="position:absolute;border-radius:50%;background:#f5c518;box-shadow:0 0 0 6px rgba(245,197,24,.13);"+
+    "left:"+(x-r)+"px;top:"+(y-r)+"px;width:"+(2*r)+"px;height:"+(2*r)+"px";
+}
+function onDown(ev){
+  if(mode!=="click"||!pending)return;
+  const a=arena(),x=ev.clientX-a.left,y=ev.clientY-a.top;
+  const dx=x-pending.x,dy=y-pending.y,d=Math.hypot(dx,dy);
+  shots.push({d:d,dx:dx,dy:dy,r:pending.r,hit:d<=pending.r,
+              ms:performance.now()-pending.at});
+  const dot=document.createElement("div");
+  dot.className="dot"+(d<=pending.r?" hit":"");
+  dot.style.left=x+"px";dot.style.top=y+"px";
+  $("arena").appendChild(dot);
+  i++;nextTarget();score();
+}
+function nextFrame(){
+  const a=arena(),f=FRAMES[frames.length%FRAMES.length];
+  const el=$("trect");
+  el.style.cssText="position:absolute;border:2px dashed #f5c518;border-radius:3px;left:"+
+    (f[0]*a.width)+"px;top:"+(f[1]*a.height)+"px;width:"+((f[2]-f[0])*a.width)+
+    "px;height:"+((f[3]-f[1])*a.height)+"px";
+  const p0=toScreenNorm(a.left+f[0]*a.width,a.top+f[1]*a.height);
+  const p1=toScreenNorm(a.left+f[2]*a.width,a.top+f[3]*a.height);
+  pending={want:[p0[0],p0[1],p1[0],p1[1]]};
+}
+function onPane(rect){
+  if(mode!=="frame"||!pending||!rect)return;
+  const w=pending.want,g=rect;
+  const ix=Math.max(0,Math.min(w[2],g[2])-Math.max(w[0],g[0]));
+  const iy=Math.max(0,Math.min(w[3],g[3])-Math.max(w[1],g[1]));
+  const inter=ix*iy,aw=(w[2]-w[0])*(w[3]-w[1]),ag=(g[2]-g[0])*(g[3]-g[1]);
+  const sw=(screenPx&&screenPx[0])||screen.width,sh=(screenPx&&screenPx[1])||screen.height;
+  frames.push({iou:inter/(aw+ag-inter||1),
+               dx:((g[0]+g[2])/2-(w[0]+w[2])/2)*sw,
+               dy:((g[1]+g[3])/2-(w[1]+w[3])/2)*sh,
+               scale:Math.sqrt(ag/(aw||1))});
+  const a=arena(),chrome=window.outerHeight-window.innerHeight;
+  const el=$("grect");                      // what the session actually took
+  el.style.cssText="position:absolute;border:2px solid #5fae6e;border-radius:3px;"+
+    "background:rgba(95,174,110,.10);left:"+(g[0]*sw-window.screenX-a.left)+"px;top:"+
+    (g[1]*sh-window.screenY-chrome-a.top)+"px;width:"+((g[2]-g[0])*sw)+"px;height:"+
+    ((g[3]-g[1])*sh)+"px";
+  score();nextFrame();
+}
+function score(){
+  if(mode==="click"){
+    const n=shots.length,h=shots.filter(s=>s.hit).length;
+    const ds=shots.map(s=>s.d).sort((a,b)=>a-b);
+    const med=n?ds[Math.floor(n/2)]:null;
+    const mean=n?shots.reduce((a,s)=>a+s.d,0)/n:null;
+    const bx=n?shots.reduce((a,s)=>a+s.dx,0)/n:null;
+    const by=n?shots.reduce((a,s)=>a+s.dy,0)/n:null;
+    const small=shots.filter(s=>s.r<=11),sh_=small.filter(s=>s.hit).length;
+    $("scores").innerHTML=
+      card("attempts",n,"targets "+TARGETS.length+" wide")+
+      card("hit rate",n?Math.round(100*h/n)+"%":"-",h+" of "+n+" inside the dot")+
+      card("median miss",fmt(med)+"px","mean "+fmt(mean)+"px")+
+      card("systematic bias",fmt(bx)+", "+fmt(by),"px x,y - a cluster means the MAPPING is off, not you")+
+      card("small targets",small.length?Math.round(100*sh_/small.length)+"%":"-",
+           "r<=11px, "+sh_+"/"+small.length);
+  }else{
+    const n=frames.length;
+    const iou=n?frames.reduce((a,f)=>a+f.iou,0)/n:null;
+    const dx=n?frames.reduce((a,f)=>a+f.dx,0)/n:null;
+    const dy=n?frames.reduce((a,f)=>a+f.dy,0)/n:null;
+    const sc=n?frames.reduce((a,f)=>a+f.scale,0)/n:null;
+    $("scores").innerHTML=
+      card("frames",n,"dashed = asked, green = captured")+
+      card("overlap",n?Math.round(100*iou)+"%":"-","IoU of captured vs asked")+
+      card("centre offset",fmt(dx)+", "+fmt(dy),"px - a constant offset is a SHIFTED map")+
+      card("size ratio",fmt(sc,2)+"x","1.00 = right size; off means wrong ZOOM");
+  }
+}
+function setMode(m){
+  mode=m;pending=null;
+  $("bclick").className=m==="click"?"on":"";$("bframe").className=m==="frame"?"on":"";
+  $("mode").textContent=m+" test";
+  $("arena").innerHTML=m==="click"?'<div id="target"></div>'
+    :'<div id="trect"></div><div id="grect"></div>';
+  $("hint").textContent=m==="click"
+    ? "Point at the yellow dot and pinch. Every landing is plotted; the bias card is the one to watch - a repeatable offset in one direction is the hand->screen map, not your aim."
+    : "Frame the dashed rectangle with both hands (thumb+index L on each), hold until the ring fills, release. The green box is what the session actually captured. Keep this window where it is: the bench converts page coords to screen coords through window.screenX/Y.";
+  score();
+  if(m==="click")nextTarget();else nextFrame();
+}
+$("bclick").onclick=()=>setMode("click");
+$("bframe").onclick=()=>setMode("frame");
+$("breset").onclick=()=>{shots=[];frames=[];i=0;setMode(mode);};
+$("arena").addEventListener("pointerdown",onDown);
+addEventListener("resize",()=>setMode(mode));
+fetch("/state").then(r=>r.json()).then(st=>{
+  screenPx=st.screen&&st.screen[0]?st.screen:null;
+  const m=st.mapping||{};
+  $("map").textContent="zoom "+(m.zoom?m.zoom.join("/")+"x":"-")+
+    "  inset "+(m.reach_inset!=null?Math.round(m.reach_inset*100)+"%":"-")+
+    "  box "+(m.reach_center||"-")+
+    "  PRISM "+(m.precision_gain_min!=null?m.precision_gain_min+"x":"-");
+  const es=new EventSource("/events");
+  es.onopen=()=>{$("dot").className="live";$("dot").innerHTML="&#9679; live";};
+  es.onerror=()=>{$("dot").className="";$("dot").innerHTML="&#9679; reconnecting";};
+  es.onmessage=ev=>{const r=JSON.parse(ev.data);
+    if(r.type==="command"&&r.command==="pane.new")onPane(r.rect);};
+  setMode("click");
 });
 </script>
 """

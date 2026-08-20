@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import math
 import sys
+import threading
+import time
 from dataclasses import dataclass
 from typing import Callable, Optional
 
@@ -92,6 +94,14 @@ class Mapping:
     precision_full_speed: float = 700.0   # px/s of the mapped target
     precision_offset_max_px: float = 60.0
     precision_recover: float = 0.10       # offset bleed per full-speed frame
+
+    # Can a held PINCH drag? Off (2026-08-20, by measurement and by choice):
+    # the cursor tracked the hand for the whole hold, so every pinch that
+    # drifted a pixel was a real drag to macOS — text selected, icons lifted,
+    # sliders moved — and the <12px pin-back only fixed where the mouse-UP
+    # landed, never the drag that had already happened. Pinned, a pinch is a
+    # click and nothing else. The fist (Config.grab_enabled) remains the drag.
+    pinch_drag: bool = False
 
     # Axis direction. Leap desktop mode is +x right, +y up, +z TOWARD the user, and
     # CG screen space is +y DOWN, so the raw signs already line up: push the hand
@@ -206,6 +216,10 @@ class DirectDriver:
         # macOS resolves the click target on mouse-up.
         self._down_pos: tuple[float, float] | None = None
         self._travel = 0.0
+        # Whether the button currently held is allowed to DRAG. Set per press
+        # by _down(); a pinch says no unless Mapping.pinch_drag is on, so the
+        # cursor is pinned for the hold and a pinch can only ever click.
+        self._drags = True
         # Absolute (touch) mode only: the live hand target of the last frame,
         # and the offset that pins the cursor to the anchor-warped commit
         # position for the whole button hold. Without it the first full-settle
@@ -342,6 +356,8 @@ class DirectDriver:
         gain *= self._edge_factor(frame)
         if gain == 0.0:
             return
+        if self._button_down and not self._drags:
+            return                          # pinned for the whole hold
         px, py = self.x, self.y
         self.x, self.y = self._contain(self.x + dx_mm * gain, self.y + dz_mm * gain)
         if self._button_down:
@@ -399,6 +415,8 @@ class DirectDriver:
             # real drag drags; the offset-clear snap lands after the click.
             tx += self._touch_offset[0]
             ty += self._touch_offset[1]
+        if self._button_down and not self._drags:
+            return                          # pinned for the whole hold
         if settle <= 0.0:
             return
         px, py = self.x, self.y
@@ -452,7 +470,7 @@ class DirectDriver:
 
     def _on_select_down(self, event: IntentEvent) -> None:
         self._warp_to_anchor(event)
-        self._down(event)
+        self._down(event, drags=self.map.pinch_drag)
 
     def _on_select_up(self, event: IntentEvent) -> None:
         self._up()
@@ -470,11 +488,34 @@ class DirectDriver:
             self._warp_to_anchor(event)
         self._down(event)
 
+    def on_command(self, event) -> None:
+        """Commands that move the MOUSE, not the keyboard.
+
+        Only DRAG: the free hand's fist holds the button while the cursor hand
+        goes on pointing. It has to land here rather than in ShortcutDriver
+        because the button and the cursor are one object's state — pressing
+        from over there would fight _down/_up over _button_down.
+        """
+        if event.command.value != "drag":
+            return
+        if event.data.get("active"):
+            self._down(None, drags=True)
+        else:
+            self._up()
+
     def _on_grab_up(self, event: IntentEvent) -> None:
         self._up()
         self._click_anchor = None       # every click cycle re-arms fresh
 
-    def _down(self, event: IntentEvent) -> None:
+    def _down(self, event: IntentEvent, drags: bool = True) -> None:
+        # `drags=False` (the pinch, by default on every source): the button is
+        # held at ONE pixel and the cursor cannot move until it is released.
+        # The old pin-back corrected only where the mouse-UP landed, so the
+        # cursor still tracked the hand for the whole hold and macOS had
+        # already been dragging — text selected, icons lifted, sliders moved —
+        # by the time the up was pinned. A pinch is a click; the fist is the
+        # drag (Config.grab_enabled), and it still drags.
+        self._drags = drags or self._button_down
         if (self.map.absolute and not self._button_down
                 and self._abs_target is not None):
             # Touch mode: lock the commit position for the whole hold. The
@@ -525,9 +566,14 @@ class ShortcutDriver:
     # long by design.
     MAX_DICTATION_S = 180.0
 
-    def __init__(self, backend: Backend, pane_action: str = "screenshot"):
+    def __init__(self, backend: Backend, pane_action: str = "screenshot",
+                 grab_session=None):
         self.backend = backend
-        self.pane_action = pane_action      # "screenshot" | "window" | "tab"
+        self.pane_action = pane_action      # "screenshot"|"window"|"tab"|"grab"
+        # grab.GrabSession when --pane grab: the frame gesture names a
+        # component instead of screenshotting one, and the dictation OFF edge
+        # completes it. None everywhere else, so nothing else changes.
+        self.grab = grab_session
         import threading
         self._dict_lock = threading.Lock()
         self._dictating = False
@@ -544,7 +590,9 @@ class ShortcutDriver:
         elif name == "mission_control":
             self.backend.key(self.KEY_UP, ctrl=True)
         elif name == "dictate":
-            self._dictate(event.data.get("active", False))
+            active = event.data.get("active", False)
+            if self._dictate(active) and not active:
+                self._collect_transcript()
         elif name == "copy":
             self.backend.key(self.KEY_C, cmd=True)
         elif name == "paste":
@@ -578,6 +626,43 @@ class ShortcutDriver:
                 self._dict_timer.start()
             return True
 
+    def _collect_transcript(self) -> None:
+        """Dictation just ended — hand what was said to the open grab.
+
+        The transcript reaches us the same way the element did: the dictation
+        app pastes, so it lands on the clipboard. We read it rather than
+        intercepting the audio, which keeps leap-input out of the speech
+        business entirely and works with whatever recogniser is bound to the
+        Option hold.
+
+        Threaded and polled: transcription finishes some seconds after the
+        key releases, and the control loop must not wait for it.
+        """
+        if self.grab is None or self.grab.open is None:
+            return
+        from . import grab as grab_mod
+
+        before = grab_mod.clipboard()
+
+        def run() -> None:
+            said = ""
+            for _ in range(60):             # up to ~12s of recogniser latency
+                time.sleep(0.2)
+                now = grab_mod.clipboard()
+                if now and now != before:
+                    said = now
+                    break
+            g = self.grab.speak(said)
+            if g is not None:
+                print(f"[grab] {g.id} queued — \"{(g.said or '')[:60]}\"  "
+                      f"(agent: leapinput-grab next)", file=sys.stderr)
+            else:
+                print("[grab] no transcript arrived — nothing queued",
+                      file=sys.stderr)
+
+        threading.Thread(target=run, name="grab-transcript",
+                         daemon=True).start()
+
     def _dictation_watchdog(self) -> None:
         if not self.release_dictation():
             return                          # the stop edge won the race
@@ -600,6 +685,9 @@ class ShortcutDriver:
 
     def _new_pane(self, rect) -> None:
         """Act on the framed region: capture it, or spawn a window over it."""
+        if self.pane_action == "grab" and self.grab is not None:
+            self._grab_component(rect)
+            return
         if self.pane_action == "screenshot":
             region = frame_region_px(rect, self.backend.screen, min_frac=0.05)
             if region is not None:
@@ -614,6 +702,51 @@ class ShortcutDriver:
         region = frame_region_px(rect, self.backend.screen, min_frac=0.15)
         if region is not None:
             _place_front_window(*region)
+
+    def _grab_component(self, rect) -> None:
+        """Name the thing under the hand, then wait for you to say what to do.
+
+        Cmd+C is the whole React Grab interface: with it installed, the copy
+        puts the element, its component and its source line on the clipboard.
+        We press it, read the pasteboard back, and file it with a screenshot
+        of the framed region — the picture carries the layout context that a
+        source reference cannot.
+
+        Runs on a thread: `screencapture` and `osascript` both block for
+        hundreds of ms, and the control loop cannot wait for either.
+        """
+        from . import grab as grab_mod
+
+        region = frame_region_px(rect, self.backend.screen, min_frac=0.02)
+
+        def run() -> None:
+            try:
+                before = grab_mod.clipboard()
+                self.backend.key(self.KEY_C, cmd=True)   # React Grab copies
+                element = ""
+                for _ in range(12):                      # ~1.2s, it is a DOM walk
+                    time.sleep(0.1)
+                    now = grab_mod.clipboard()
+                    if now and now != before:
+                        element = now
+                        break
+                shot = None
+                if region is not None:
+                    g_dir = self.grab.store.dir()
+                    name = f"{self.grab.store.next_id()}.png"
+                    if _screenshot_file(*region, g_dir / name):
+                        shot = name
+                g = self.grab.capture(element=element, rect=region, shot=shot,
+                                      app=grab_mod.frontmost_app())
+                where = grab_mod._first_source_line(element) or g.app or "?"
+                print(f"[grab] {g.id} <- {where}"
+                      f"{'' if element else '  (no element: is React Grab running?)'}"
+                      f"  — thumbs-up and say what to change",
+                      file=sys.stderr)
+            except Exception as exc:                     # never break control
+                print(f"[grab] capture FAILED: {exc}", file=sys.stderr)
+
+        threading.Thread(target=run, name="grab-capture", daemon=True).start()
 
 
 def frame_region_px(rect, screen: tuple[float, float],
@@ -666,6 +799,20 @@ def _screenshot_region(x: int, y: int, w: int, h: int) -> None:
             pass
 
     threading.Thread(target=run, name="frame-shot", daemon=True).start()
+
+
+def _screenshot_file(x: int, y: int, w: int, h: int, path) -> bool:
+    """Region -> a PNG on disk (not the clipboard, which grab mode is using to
+    carry the element reference). Synchronous: the caller is already on a
+    thread and wants to know whether the file exists before filing a record."""
+    import subprocess
+    try:
+        out = subprocess.run(
+            ["screencapture", "-x", f"-R{x},{y},{w},{h}", str(path)],
+            capture_output=True, text=True, timeout=10.0)
+        return out.returncode == 0 and path.exists()
+    except Exception:
+        return False
 
 
 def _place_front_window(x: int, y: int, w: int, h: int) -> None:

@@ -1,0 +1,17 @@
+{
+  "extend_on_deg": 61.121649999999995,
+  "extend_off_deg": 80.1473,
+  "extended_max_deg": 70.634475,
+  "thumb_on_ratio": 1.224933,
+  "thumb_off_ratio": 1.1234715,
+  "pinch_on_mm": 37.7455,
+  "pinch_off_mm": 52.70100000000001,
+  "pinch_source": "image",
+  "reach_x0": 0.5509,
+  "reach_y0": 0.4796,
+  "reach_x1": 0.8504,
+  "reach_y1": 0.7896,
+  "reach_center": "palm",
+  "hand_span_mm": 0.0,
+  "ref_span_img": 0.058
+}

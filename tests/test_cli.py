@@ -127,3 +127,43 @@ def test_stall_watch_stays_quiet_when_the_stream_never_started():
     assert w.update(0, 0.0) == (False, False)
     assert w.update(0, 0.6) == (True, False)        # release yes, warn no
     assert w.update(0, 9.0) == (False, False)
+
+
+# --- the projection knobs the bench bisects against --------------------------
+
+def test_projection_flags_override_the_stored_tuning():
+    """Each 2026-08-18/19 projection change gets its own switch, so a bench
+    score can be attributed to one of them instead of to 'the new mapping'."""
+    from leapinput.camera import Tuning
+
+    stored = Tuning(reach_x0=0.1, reach_y0=0.1, reach_x1=0.6, reach_y1=0.6,
+                    reach_center="palm", reach_inset=0.10)
+
+    def flags(**kw):
+        base = dict(no_reach=False, reach_center=None, reach_inset=None)
+        base.update(kw)
+        return SimpleNamespace(**base)
+
+    untouched = cli.apply_projection_flags(stored, flags())
+    assert untouched.reach_center == "palm" and untouched.reach_inset == 0.10
+    assert untouched.reach == (0.1, 0.1, 0.6, 0.6)
+
+    fixed = cli.apply_projection_flags(stored, flags(reach_center="fixed"))
+    assert fixed.reach_center == "fixed"
+    assert fixed.reach == (0.1, 0.1, 0.6, 0.6)      # box itself unchanged
+
+    flat = cli.apply_projection_flags(stored, flags(reach_inset=0.0))
+    assert flat.reach_inset == 0.0
+
+    whole = cli.apply_projection_flags(stored, flags(no_reach=True))
+    assert whole.reach == (0.0, 0.0, 1.0, 1.0)
+
+
+def test_prism_precision_is_on_by_default_and_has_an_off_switch():
+    from leapinput.driver import Mapping
+
+    m = Mapping()
+    assert m.precision_gain_min < 1.0            # sub-1:1 gain when slow
+    assert m.precision_offset_max_px > 0.0       # ...paid for with an offset
+    m.precision_gain_min = 1.0                   # what --no-precision does
+    assert m.precision_gain_min == 1.0

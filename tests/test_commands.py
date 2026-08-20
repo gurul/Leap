@@ -506,3 +506,97 @@ def test_thumbs_up_formed_without_a_fist_arms_immediately():
         engine.on_snapshot(Snapshot(
             right=frame("Right", t, THUMBS_UP, pinch=40.0)))
     assert engine.dictate.progress(t / 1e6) > 0.0
+
+
+# --- the free hand's fist holds the mouse button ------------------------------
+
+def fist_snap(t_us, present=True, cursor_extended=OPEN):
+    """Free hand (Left) fisted, cursor hand (Right) present and neutral."""
+    return Snapshot(
+        left=frame("Left", t_us, (False,) * 5) if present else None,
+        right=frame("Right", t_us, cursor_extended))
+
+
+def drag_events(engine, snaps):
+    fired = []
+    engine.subscribe(lambda e: fired.append(e))
+    for s in snaps:
+        engine.on_snapshot(s)
+    return [(e.command, e.data.get("active")) for e in fired
+            if e.command is Command.DRAG]
+
+
+def test_a_free_hand_fist_presses_and_holds():
+    engine = CommandEngine(hand="Right")
+    t = 0
+    snaps = []
+    while t / 1e6 < 0.5:                        # past DRAG_ARM_S
+        t += FRAME_US
+        snaps.append(fist_snap(t))
+    assert drag_events(engine, snaps) == [(Command.DRAG, True)]
+
+
+def test_a_fist_shorter_than_the_arm_never_presses():
+    """A hand closing on its way somewhere else must not drag."""
+    engine = CommandEngine(hand="Right")
+    t, snaps = 0, []
+    while t / 1e6 < 0.10:                       # under DRAG_ARM_S (0.18)
+        t += FRAME_US
+        snaps.append(fist_snap(t))
+    for _ in range(6):
+        t += FRAME_US
+        snaps.append(Snapshot(left=frame("Left", t, OPEN),
+                              right=frame("Right", t, OPEN)))
+    assert drag_events(engine, snaps) == []
+
+
+def test_opening_the_fist_releases_the_button():
+    engine = CommandEngine(hand="Right")
+    t, snaps = 0, []
+    while t / 1e6 < 0.5:
+        t += FRAME_US
+        snaps.append(fist_snap(t))
+    for _ in range(3):
+        t += FRAME_US
+        snaps.append(Snapshot(left=frame("Left", t, OPEN),
+                              right=frame("Right", t, OPEN)))
+    assert drag_events(engine, snaps) == [(Command.DRAG, True),
+                                          (Command.DRAG, False)]
+
+
+def test_a_vanished_free_hand_releases_the_button():
+    """Dead-man: tracking loss must drop the button on the same frame."""
+    engine = CommandEngine(hand="Right")
+    t, snaps = 0, []
+    while t / 1e6 < 0.5:
+        t += FRAME_US
+        snaps.append(fist_snap(t))
+    t += FRAME_US
+    snaps.append(fist_snap(t, present=False))   # free hand gone
+    assert drag_events(engine, snaps)[-1] == (Command.DRAG, False)
+
+
+def test_pausing_mid_drag_releases_the_button():
+    """A button held by a fist nobody is watching must not outlive the pause."""
+    engine = CommandEngine(hand="Right")
+    t, snaps = 0, []
+    while t / 1e6 < 0.5:
+        t += FRAME_US
+        snaps.append(fist_snap(t))
+    fired = []
+    engine.subscribe(lambda e: fired.append(e))
+    for s in snaps:
+        engine.on_snapshot(s)
+    assert engine._dragging is True
+    engine.enabled = False
+    t += FRAME_US
+    engine.on_snapshot(fist_snap(t))            # still fisted, engine paused
+    assert (Command.DRAG, False) in [(e.command, e.data.get("active"))
+                                     for e in fired]
+    assert engine._dragging is False
+
+
+def test_the_free_hand_fist_does_not_fire_copy_paste_or_enter():
+    """A fist must be unambiguous against the other free-hand poses."""
+    f = frame("Left", 0, (False,) * 5)
+    assert not is_pinch_hold(f, 50.0) and not is_v_pose(f) and not is_ily_pose(f)

@@ -107,6 +107,25 @@ class _StallWatch:
         return False, False
 
 
+def apply_projection_flags(tuning, args):
+    """Stored tuning + the flags that change the hand->screen PROJECTION.
+
+    Kept as its own function because these three are the bench's independent
+    variables: the box (whole frame / calibrated / palm-anchored), the comfort
+    inset that scales it, and — over in Mapping — the PRISM offset. Scoring an
+    accuracy run is only meaningful if exactly one of them moved.
+    """
+    import dataclasses
+    if getattr(args, "no_reach", False):
+        tuning = dataclasses.replace(tuning, reach_x0=0.0, reach_y0=0.0,
+                                     reach_x1=1.0, reach_y1=1.0)
+    if getattr(args, "reach_center", None) is not None:
+        tuning = dataclasses.replace(tuning, reach_center=args.reach_center)
+    if getattr(args, "reach_inset", None) is not None:
+        tuning = dataclasses.replace(tuning, reach_inset=args.reach_inset)
+    return tuning
+
+
 def resolve_source_defaults(args) -> None:
     """Per-source defaults for every axis-and-posture flag the user left unset.
 
@@ -190,7 +209,7 @@ def main(argv=None) -> int:
     ap.add_argument("--no-screen-overlay", action="store_true",
                     help="camera only: don't draw the framed region on the "
                          "screen while holding the finger-frame pose")
-    ap.add_argument("--pane", choices=("screenshot", "window", "tab"),
+    ap.add_argument("--pane", choices=("screenshot", "window", "tab", "grab"),
                     default="screenshot",
                     help="what the finger-frame gesture does: screenshot the "
                          "framed region to the clipboard (default), spawn a "
@@ -237,6 +256,33 @@ def main(argv=None) -> int:
     ap.add_argument("--no-reach", action="store_true",
                     help="camera only: ignore the stored reach box and map the "
                          "whole frame, as before `leapinput.reach map` ran")
+    # The three knobs that changed the PROJECTION in the 2026-08-18/19 passes.
+    # Each is a separate flag so the accuracy bench can attribute a score to
+    # one of them instead of to "the new mapping" as a lump.
+    ap.add_argument("--reach-center", choices=("palm", "fixed"), default=None,
+                    help="camera only: 'palm' (default) re-anchors the reach "
+                         "box on your palm at every engagement — one "
+                         "projection per engagement. 'fixed' pins the "
+                         "calibrated box, so a screen position is always the "
+                         "same place in the air")
+    ap.add_argument("--reach-inset", type=float, default=None,
+                    help="camera only: comfort inset per side (default 0.10). "
+                         "0 maps the box exactly to the screen; higher maps it "
+                         "to MORE than the screen, so edges land inside the "
+                         "comfortable envelope at the cost of magnifying "
+                         "everything by 1/(1-2*inset)")
+    ap.add_argument("--pinch-drag", action="store_true",
+                    help="let a held pinch drag (off by default: the cursor is "
+                         "pinned for the whole hold, so a pinch can only ever "
+                         "click and cannot select text or lift an icon). The "
+                         "fist still drags where it is enabled")
+    ap.add_argument("--no-precision", action="store_true",
+                    help="disable the PRISM slow-hand precision layer. It "
+                         "buys small targets by carrying a bounded offset (up "
+                         "to 60px) that only bleeds off at speed, which is "
+                         "position-INFIDELITY in an absolute map — turn it "
+                         "off if the cursor lands near, but not on, what you "
+                         "point at")
     ap.add_argument("--cutoff", type=float, default=None,
                     help="1 euro filter floor in Hz. Lower = smoother when "
                          "still but laggier; raise it if the cursor feels like "
@@ -289,10 +335,7 @@ def main(argv=None) -> int:
     if args.source != "leap":
         import dataclasses
         from .camera import Tuning
-        tuning = Tuning.load()
-        if args.no_reach:
-            tuning = dataclasses.replace(tuning, reach_x0=0.0, reach_y0=0.0,
-                                         reach_x1=1.0, reach_y1=1.0)
+        tuning = apply_projection_flags(Tuning.load(), args)
         if tuning.reach_active:
             zx, zy = tuning.reach_zoom
             print(f"reach box active — zoom {zx:.1f}x/{zy:.1f}x "
@@ -360,6 +403,10 @@ def main(argv=None) -> int:
         mapping.pointer_min_cutoff = args.cutoff
     if args.beta is not None:
         mapping.pointer_beta = args.beta
+    if args.no_precision:
+        mapping.precision_gain_min = 1.0    # the documented off switch
+    if args.pinch_drag:
+        mapping.pinch_drag = True
     engine = GestureEngine(gesture_cfg)
     direct = DirectDriver(backend, mapping)
     engine.subscribe(direct.on_intent)
@@ -371,8 +418,21 @@ def main(argv=None) -> int:
         from .commands import CommandEngine
         command_engine = CommandEngine(hand=args.hand,
                                        pinch_on_mm=gesture_cfg.pinch_on_mm)
-        shortcuts = ShortcutDriver(backend, pane_action=args.pane)
+        grab_session = None
+        if args.pane == "grab":
+            from .grab import GrabSession
+            grab_session = GrabSession()
+            print(f"GRAB MODE — framing a component files a change request "
+                  f"instead of a screenshot.\n"
+                  f"  frame it, then thumbs-up and say what to change.\n"
+                  f"  needs React Grab in the page (npx grab@latest init); "
+                  f"the agent works the queue with: leapinput-grab next")
+        shortcuts = ShortcutDriver(backend, pane_action=args.pane,
+                                   grab_session=grab_session)
         command_engine.subscribe(shortcuts.on_command)
+        # DRAG is a mouse command: the cursor driver owns the button, so it
+        # subscribes too. Ordering is irrelevant — they handle disjoint sets.
+        command_engine.subscribe(direct.on_command)
         # Keep the pose state machine honest when the dictation watchdog
         # force-releases Option behind its back (plain attribute assignment:
         # harmless if the driver never fires it).
@@ -434,10 +494,14 @@ def main(argv=None) -> int:
                               pinch_off_mm=gesture_cfg.pinch_off_mm,
                               out_dir=tele_dir / "telemetry")
         engine.subscribe(telemetry.on_intent)
+        if command_engine is not None:
+            command_engine.subscribe(telemetry.on_command)
         tele_url = TelemetryServer(telemetry, port=args.telemetry_port).start()
         if tele_url:
             print(f"telemetry dashboard: {tele_url}  "
                   "(P tags the last click as a phantom)")
+            print(f"accuracy bench:      {tele_url}/bench  "
+                  "(scored click + framing targets)")
         else:
             print(f"telemetry port {args.telemetry_port} taken — dashboard "
                   "off, click log still recording", file=sys.stderr)
@@ -561,6 +625,8 @@ def main(argv=None) -> int:
             print(f"  {free} (free) hand:")
             print("    pinch and hold = Cmd+C    V sign = Cmd+V    "
                   "ILY = Enter")
+            print("    FIST = hold the mouse button — point with the other "
+                  "hand to drag/rotate")
         if args.duration:
             print(f"  auto-stops after {args.duration:.0f}s")
     where = ("into the camera view" if args.source != "leap"
@@ -612,6 +678,14 @@ def main(argv=None) -> int:
             warned_at = time.monotonic() + 4.0
             lag_warned_at = time.monotonic() + 4.0
             sig_assert_at = time.monotonic() + 2.0
+            # A denied Camera permission is not an error anywhere: cv2 logs one
+            # "not authorized to capture video" line and cap.read() then fails
+            # forever, so the session sits looking ON and tracking nothing. Say
+            # it once, in words, naming what has to be granted. Only for the
+            # webcam — the phone source is legitimately frameless until the
+            # device connects.
+            blind_at = (time.monotonic() + 5.0 if args.source == "camera"
+                        else None)
             stall_watch = _StallWatch()
             while deadline is None or time.monotonic() < deadline:
                 if cv2 is not None:
@@ -663,6 +737,18 @@ def main(argv=None) -> int:
                     if stall_warn:
                         print("  frame stream stalled — released held input",
                               file=sys.stderr)
+                if blind_at is not None and time.monotonic() > blind_at:
+                    blind_at = None                 # once is the whole point
+                    if source.frames == 0:
+                        print(
+                            "\n  CAMERA DELIVERED NO FRAMES IN 5s — this is a "
+                            "denied Camera permission, not a tracking problem.\n"
+                            "  System Settings > Privacy & Security > Camera "
+                            "must list the app that STARTED this session:\n"
+                            "    menu bar switch -> 'Leap Menubar'   |   "
+                            "CLI run -> your terminal app\n"
+                            "  Grant it, then turn the session off and on "
+                            "again.\n", file=sys.stderr)
             else:
                 print(f"\nauto-stopped after {args.duration:.0f}s")
         except KeyboardInterrupt:

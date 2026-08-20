@@ -5,13 +5,29 @@
 | Pose | Action |
 |---|---|
 | point (1–3 fingers) | cursor moves |
-| pinch | click / drag (two quick pinches = real double-click) |
-| fist | drag (`--source leap`; off by default on camera¹, `--drag` re-enables) |
+| pinch | click, and **only** a click (two quick pinches = real double-click) |
+| **free-hand fist** | **DRAG** — holds the mouse button while the cursor hand points |
+| cursor-hand fist | drag (`--source leap`; off by default on camera¹, `--drag` re-enables) |
 | open hand (4–5 fingers) | **LIFT** — cursor parked, reposition freely |
 | hand out of view | disengaged, everything released |
 
-¹ On camera, pinch misreads made the fist flaky — and pinch already holds the
-button, so pinch-and-move drags.
+¹ On camera, pinch misreads made the cursor-hand fist flaky.
+
+**A pinch cannot drag** (2026-08-20, `Mapping.pinch_drag`, `--pinch-drag`
+re-enables). The cursor is pinned to a single pixel for the whole hold, so a
+pinch can never select text or lift an icon. It used to: the cursor tracked
+the hand while the button was down, so any drift was a real drag to macOS, and
+the `CLICK_TRAVEL_PX` pin-back only corrected where the mouse-*up* landed —
+after the drag had already happened. Clicking a UI element is the common case
+(and the one a source-mapping tool like React Grab needs to be exact); dragging
+is the rare one, so it moved to a gesture that cannot be confused with a click.
+
+**Drag is the free hand's fist.** Close the free hand, and the mouse button
+stays down while the *cursor* hand points — one hand holds, the other moves,
+which is how a mouse has always worked, and what rotating a 3D figure wants.
+It arms after 0.18s so a hand closing on its way elsewhere cannot press;
+release is never gated — opening the hand, losing it, or pausing drops the
+button on that frame.
 
 Slowing the hand down engages **precision mode** (PRISM): sub-1:1 motion for
 tiny targets like the traffic-light buttons, transparent 1:1 at speed. Clicks
@@ -47,6 +63,7 @@ position is trusted to be the free hand:
 | pinch and hold | Cmd+C ("grab it") |
 | V sign (thumb ignored) | Cmd+V (the literal letter) |
 | ILY sign | Enter (submit what you dictated) |
+| fist (hold, 0.18s to arm) | **DRAG** — mouse button down until you open the hand |
 
 The full dictation loop: thumbs-up (Tink) and speak, thumbs-up again (Pop —
 Willow pastes), free-hand ILY to submit.

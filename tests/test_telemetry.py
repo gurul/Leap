@@ -131,3 +131,81 @@ def test_server_serves_page_state_and_mark(tmp_path):
         assert marked["marked"] == 1
     finally:
         server.stop()
+
+
+# --- the accuracy bench ----------------------------------------------------------
+
+class _FakeCommand:
+    """Shaped like commands.CommandEvent: .command.value plus .data."""
+
+    class _Kind:
+        def __init__(self, value):
+            self.value = value
+
+    def __init__(self, value, **data):
+        self.command = self._Kind(value)
+        self.data = data
+
+
+class _FakeDirect:
+    """DirectDriver stand-in: cursor position and screen size."""
+    x, y, w, h = 300.4, 150.6, 1512, 982
+    map = None
+
+
+def test_pane_rect_reaches_the_browser_the_moment_it_fires():
+    """The bench scores framing against the committed rect, so the rect must
+    ride the live event stream — not only the session log."""
+    tele = make_telemetry()
+    q = tele.attach()
+    tele.on_command(_FakeCommand("pane.new", rect=(0.1, 0.2, 0.3, 0.44444)))
+    rec = q.get(timeout=2)
+    assert rec["type"] == "command" and rec["command"] == "pane.new"
+    assert rec["rect"] == [0.1, 0.2, 0.3, 0.4444]
+    assert tele.events[-1]["rect"] is not None
+
+
+def test_commands_without_a_rect_are_still_reported():
+    tele = make_telemetry()
+    tele.on_command(_FakeCommand("mission.control"))
+    assert tele.events[-1] == {**tele.events[-1], "command": "mission.control",
+                               "rect": None}
+
+
+def test_on_command_swallows_garbage_like_every_other_entry_point():
+    tele = make_telemetry()
+    tele.on_command(None)                       # not a CommandEvent at all
+    tele.on_command(_FakeCommand("pane.new", rect="not a rect"))
+    assert len(tele.events) == 0                # dropped, never raised
+
+
+def test_clicks_carry_where_the_cursor_actually_was():
+    tele = make_telemetry()
+    tele.direct = _FakeDirect()
+    q = tele.attach()
+    tele.on_intent(intent(Intent.SELECT_DOWN))
+    q.get(timeout=2)                            # the intent record leads
+    rec = q.get(timeout=2)
+    assert rec["type"] == "click" and rec["cx"] == 300.4 and rec["cy"] == 150.6
+
+
+def test_state_publishes_the_screen_and_the_mapping_knobs():
+    """A score is only comparable against another run if the mapping that
+    produced it is on the page next to it."""
+    tele = make_telemetry()
+    tele.direct = _FakeDirect()
+    assert tele.state()["screen"] == [1512, 982]
+    assert tele.state()["mapping"] == {}         # no source/mapping wired: empty
+    assert "screen" in tele.state() and "mapping" in tele.state()
+
+
+def test_server_serves_the_bench(tmp_path):
+    tele = make_telemetry(tmp_path)
+    server = TelemetryServer(tele, port=0)
+    url = server.start()
+    try:
+        page = urllib.request.urlopen(f"{url}/bench", timeout=5).read().decode()
+        assert "LEAP BENCH" in page
+        assert "pane.new" in page               # the frame test is wired
+    finally:
+        server.stop()

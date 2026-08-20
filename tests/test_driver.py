@@ -475,7 +475,10 @@ def test_click_up_lands_on_the_down_pixel():
                                  frame(1.6, 150, 0, 80_000), {"settle": 1.0}))
     driver.on_intent(IntentEvent(Intent.SELECT_UP, 0.1, frame(1.6, 150, 0, 100_000)))
     assert (driver.x, driver.y) == down_xy
-    assert backend.calls[-2:] == [("move", *down_xy), ("up", *down_xy)]
+    # Stronger than it used to be: the pin-back is no longer REACHED, because
+    # a pinned pinch never moved the cursor for it to correct (2026-08-20).
+    # down then up on the same pixel, with nothing in between.
+    assert backend.calls[-2:] == [("down", *down_xy), ("up", *down_xy)]
 
 
 # --- touch-mode click anchor (2026-08-19) ------------------------------------
@@ -794,3 +797,106 @@ def test_touch_precision_offset_is_bounded_and_bleeds_at_speed():
                                                t0 + i * 33_000),
                                      {"settle": 1.0}))
     assert math.hypot(*driver._prec_off) < off * 0.3    # bled away
+
+
+# --- a pinch clicks, and only clicks ------------------------------------------
+
+def _hold_and_move(driver, down_intent, up_intent, t0=0.0):
+    """Press, drag the hand 120mm sideways over ~0.4s, release. Returns the
+    cursor positions observed while the button was held."""
+    start = frame(0.0, 200.0, 0.0, 0)
+    drive(driver, [start])
+    driver.on_intent(IntentEvent(down_intent, t0, start))
+    seen = []
+    for i in range(1, 13):
+        f = frame(i * 10.0, 200.0, 0.0, i * 33_000, vx=300.0)
+        driver.on_intent(IntentEvent(Intent.POINT_MOVE, t0 + i * 0.033, f))
+        seen.append((driver.x, driver.y))
+    driver.on_intent(IntentEvent(up_intent, t0 + 0.45, None))
+    return seen
+
+
+def test_a_held_pinch_cannot_drag_the_cursor():
+    """The defect this pins: the pin-back only corrected where the mouse-UP
+    landed, so the cursor tracked the hand for the whole hold and macOS had
+    already been dragging — a pinch meant as a click selected text."""
+    driver, backend = make()
+    driver.on_intent(IntentEvent(Intent.CLUTCH_DOWN, 0.0, frame(0, 200, 0, 0)))
+    seen = _hold_and_move(driver, Intent.SELECT_DOWN, Intent.SELECT_UP)
+    assert len(set(seen)) == 1, f"cursor moved while pinched: {set(seen)}"
+    # ...and no move events reached the OS between the down and the up.
+    kinds = [c[0] for c in backend.calls]
+    down, up = kinds.index("down"), len(kinds) - 1 - kinds[::-1].index("up")
+    assert "move" not in kinds[down:up]
+
+
+def test_a_held_fist_still_drags():
+    """The fist is the drag gesture; pinning the pinch must not pin it too."""
+    driver, _ = make()
+    driver.on_intent(IntentEvent(Intent.CLUTCH_DOWN, 0.0, frame(0, 200, 0, 0)))
+    seen = _hold_and_move(driver, Intent.GRAB_DOWN, Intent.GRAB_UP)
+    assert len(set(seen)) > 1, "fist-drag froze — the drag gesture is dead"
+
+
+def test_pinch_drag_can_be_turned_back_on():
+    driver, _ = make(Mapping(plane="xz", pinch_drag=True))
+    driver.on_intent(IntentEvent(Intent.CLUTCH_DOWN, 0.0, frame(0, 200, 0, 0)))
+    seen = _hold_and_move(driver, Intent.SELECT_DOWN, Intent.SELECT_UP)
+    assert len(set(seen)) > 1
+
+
+def test_a_pinch_that_becomes_a_fist_hands_over_a_live_drag():
+    """The pinch->fist handover emits grab.down with the button already held.
+    That must ARM the drag, not stay pinned — otherwise the documented
+    'close into a fist to drag' path is dead."""
+    driver, _ = make()
+    start = frame(0.0, 200.0, 0.0, 0)
+    drive(driver, [start])
+    driver.on_intent(IntentEvent(Intent.SELECT_DOWN, 0.0, start))
+    driver.on_intent(IntentEvent(Intent.GRAB_DOWN, 0.05, start))   # handover
+    before = (driver.x, driver.y)
+    for i in range(1, 10):
+        f = frame(i * 10.0, 200.0, 0.0, i * 33_000, vx=300.0)
+        driver.on_intent(IntentEvent(Intent.POINT_MOVE, 0.05 + i * 0.033, f))
+    assert (driver.x, driver.y) != before
+
+
+def test_a_pinned_pinch_never_leaves_the_button_held():
+    """The hard rule: no pin, freeze or guard may strand a button down."""
+    driver, backend = make()
+    driver.on_intent(IntentEvent(Intent.CLUTCH_DOWN, 0.0, frame(0, 200, 0, 0)))
+    _hold_and_move(driver, Intent.SELECT_DOWN, Intent.SELECT_UP)
+    assert [c[0] for c in backend.calls].count("down") == 1
+    assert [c[0] for c in backend.calls][-1] == "up" or "up" in [c[0] for c in backend.calls]
+    assert driver._button_down is False
+
+
+def test_the_drag_command_presses_and_the_cursor_follows():
+    """The free-hand fist arrives as a COMMAND, not an intent, and must hold
+    the button while the cursor hand goes on moving."""
+    from leapinput.commands import Command, CommandEvent
+
+    driver, backend = make()
+    driver.on_intent(IntentEvent(Intent.CLUTCH_DOWN, 0.0, frame(0, 200, 0, 0)))
+    driver.on_command(CommandEvent(Command.DRAG, 0.0, {"active": True}))
+    assert driver._button_down is True
+    seen = []
+    for i in range(1, 10):
+        f = frame(i * 10.0, 200.0, 0.0, i * 33_000, vx=300.0)
+        driver.on_intent(IntentEvent(Intent.POINT_MOVE, i * 0.033, f))
+        seen.append((driver.x, driver.y))
+    assert len(set(seen)) > 1, "fist-drag did not move the cursor"
+    driver.on_command(CommandEvent(Command.DRAG, 0.4, {"active": False}))
+    assert driver._button_down is False
+    assert [c[0] for c in backend.calls].count("down") == 1
+
+
+def test_other_commands_do_not_touch_the_mouse():
+    from leapinput.commands import Command, CommandEvent
+
+    driver, backend = make()
+    for cmd in (Command.COPY, Command.PASTE, Command.ENTER,
+                Command.MISSION_CONTROL):
+        driver.on_command(CommandEvent(cmd, 0.0, {}))
+    assert backend.calls == []
+    assert driver._button_down is False

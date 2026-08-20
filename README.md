@@ -39,7 +39,14 @@ Always-on, once it's good enough to live with:
 scripts/leapctl on          # detached; leapctl off / status / log
 scripts/leapctl on --source phone     # opt in to the phone/WebRTC source
 nohup .venv/bin/leapinput-menubar >/dev/null 2>&1 &   # ✋ one-click menu bar switch
+scripts/install-menubar-app.sh        # ... or as an app that can start at login
 ```
+
+The `.app` wrapper is not just packaging: macOS attributes the Camera grant to
+the app that starts the process tree, so the bundle is what System Settings
+lists and what has to declare `NSCameraUsageDescription`. Built by hand without
+it, **Turn on** starts a session that opens a camera which never delivers a
+frame — see [docs/troubleshooting.md](docs/troubleshooting.md).
 
 The menu bar's **Turn on** always starts the built-in camera — nothing
 listens on the LAN unless you ask. **Use phone camera** is the explicit
@@ -47,6 +54,11 @@ opt-in: it starts (or switches to) the WebRTC source and copies the stream
 URL to the clipboard for the phone to open.
 
 The ILY pose (or `leapctl pause`) pauses and resumes gesture control in-band.
+
+Accuracy is measured, not felt: every session serves a scored bench at
+`http://127.0.0.1:8788/bench` — a target ladder for clicking and a draw-this
+rectangle for framing, with the live mapping printed beside the score. See
+[docs/troubleshooting.md](docs/troubleshooting.md).
 
 ## The vocabulary
 
