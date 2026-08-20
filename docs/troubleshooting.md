@@ -1,5 +1,12 @@
 # When it doesn't work
 
+> **Mixed status as of 2026-08-20.** The diagnosis tools, the camera-permission
+> section, the telemetry dashboard and the safety model are all live. The
+> **CLICK bench** and the projection table below measure cursor accuracy under
+> a projection nothing consumes by default — they need `--legacy`. The FRAME
+> test still applies. See [decisions.md](decisions.md) ·
+> [learnings/restoring.md](learnings/restoring.md).
+
 "It doesn't work" has at least four distinct causes — no tracking, no
 engagement, no clutch, no motion — and they need different fixes:
 

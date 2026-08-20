@@ -1,5 +1,14 @@
 # The interaction model, and why each part is what it is
 
+> **Describes the cursor-driving tool, which is `--legacy` as of 2026-08-20**
+> ([../decisions.md](../decisions.md) ·
+> [../learnings/restoring.md](../learnings/restoring.md)). Nothing here is
+> retracted — these are dated measurements, and they are the derivations behind
+> [../learnings/screen-mapping.md](../learnings/screen-mapping.md) and
+> [../learnings/gesture-vocabulary.md](../learnings/gesture-vocabulary.md).
+> The pose-classification and transition-shadow sections still describe live
+> behaviour.
+
 Every number here came from measurement on this hardware, or from published results.
 Nothing is a preference. If you change one, re-measure — several of these look
 arbitrary and are not.

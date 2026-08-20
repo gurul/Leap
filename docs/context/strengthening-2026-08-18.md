@@ -1,5 +1,10 @@
 # The 2026-08-18 strengthening pass
 
+> **Dated finding. Four of the five root causes are in the cursor path, which
+> is `--legacy` as of 2026-08-20** ([../decisions.md](../decisions.md)). The
+> command layer described in "The command layer (new)" is what ships today.
+> Distilled: [../learnings/](../learnings/).
+
 A multi-agent assessment of this repo against [mediapipe-touchdesigner](https://github.com/torinmb/mediapipe-touchdesigner) — an installation-grade MediaPipe integration whose robustness patterns are battle-tested in live art — plus a survey of shipping mid-air UI vocabularies (Quest, Vision Pro, Ultraleap TouchFree, Project Gameface). The assessment found the architecture sound and the *integration seams* broken: five root causes made real control feel arbitrary. All are fixed and pinned by tests.
 
 ## The five root causes

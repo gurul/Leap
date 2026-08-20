@@ -7,8 +7,14 @@
 temporal logic lives — is tested by synthesizing frames, with no device and no hands:
 
 ```bash
-.venv/bin/python -m pytest -q      # 14 tests, ~0.02s
+.venv/bin/python -m pytest -q      # 337 tests, 5.4s (measured 2026-08-20)
 ```
+
+(The count read "14 tests, ~0.02s" when this file was written on 2026-08-12.
+The progression since: 14 → 26 → 42 → 87 → 149 → 181 → 246 → 297 → 337. One
+known defect: `tests/test_calibrate.py:114` opens the gitignored
+`camera_session.jsonl` by relative path with no skip guard, so it errors on a
+fresh clone or from any cwd but the repo root.)
 
 The tests that matter most are the safety ones: `test_tracking_loss_releases_a_held_button`
 and `test_select_up_precedes_disengage`. Those cover the failure that leaves your machine

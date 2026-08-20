@@ -1,5 +1,11 @@
 # 2026-08-19 edge-reach research — perspective, insets, and what shipped
 
+> **Dated finding, entirely in the cursor path, which is `--legacy` as of
+> 2026-08-20** ([../decisions.md](../decisions.md)). The (C-lite) ρ diagnostic
+> below has **never been run with a working instrument** — the first attempt
+> read `motion_scale`, which the dynamic box absorbs to a flat 1.000. Summary:
+> [../learnings/screen-mapping.md](../learnings/screen-mapping.md#edge-reach).
+
 The user cannot comfortably reach screen edges through the dynamic palm box.
 A literature pass (alphaXiv/arXiv, CHI/UIST, OSS webcam-mouse practice)
 evaluated four candidate fixes against the drag-along-sheet design and the

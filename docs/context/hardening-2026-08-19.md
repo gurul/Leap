@@ -1,5 +1,12 @@
 # 2026-08-19 hardening pass — control discipline borrowed from PuzzleCam
 
+> **Dated finding.** The cursor and click fixes are in the `--legacy` path as
+> of 2026-08-20 ([../decisions.md](../decisions.md)); the fail-safe work under
+> "Applied — fail-safe on loss and stall" is live. **The deferred list at the
+> bottom is a live backlog** — MD-1, MD-3, MD-4 and SI-3 are cursor-path and
+> dormant, but EX-2 and FH-1 still bite the shipped tool. Suite was 246 → 280
+> at this pass; it is 337 now.
+
 A multi-agent audit of the control layer against [mishu006/Puzzle](https://github.com/mishu006/Puzzle)
 (PuzzleCam), a 1,225-line MediaPipe photobooth app whose gesture control is unusually
 disciplined. Its screenshot-frame flow in particular — direct absolute mapping, live

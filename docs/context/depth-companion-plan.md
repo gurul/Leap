@@ -1,5 +1,11 @@
 # The depth companion: iPhone 17 Pro LiDAR/TrueDepth as a native source
 
+> **Phase 1 only, and the phone path it attaches to is `--legacy` as of
+> 2026-08-20** ([../decisions.md](../decisions.md)). Phase 2
+> (`DepthPhoneSource`) was never built. Not a dead end — it is the roadmap
+> unlock that would retire every monocular workaround at once. Note the dated
+> item: free-team signing on the phone expired ~2026-08-25.
+
 Status 2026-08-18: scaffolded. `ios/LeapDepth/` holds the Swift app,
 `src/leapinput/phonedepth.py` the Mac receiver. This is the deliberate
 exception to the no-install principle — real metric depth is the one thing

@@ -1,5 +1,12 @@
 # Verified environment
 
+> **The Leap Motion half of this file describes the `--legacy` path as of
+> 2026-08-20** — the built-in webcam is the daily driver
+> ([../decisions.md](../decisions.md)). The camera section at the bottom, and
+> the "known dead ends" table, are live. Re-verify with
+> `scripts/verify-env.sh` rather than trusting any of it after a Hyperion or
+> macOS update.
+
 Everything here was measured on this machine, not inferred. Date verified: **2026-08-12**.
 Re-verify with `scripts/verify-env.sh` rather than trusting this file after a Hyperion or macOS update.
 

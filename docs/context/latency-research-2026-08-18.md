@@ -1,5 +1,12 @@
 # Low-latency research pass — 2026-08-18
 
+> **The phone/WebRTC source is `--legacy` as of 2026-08-20**
+> ([../decisions.md](../decisions.md)); restore with
+> `scripts/leapctl on --legacy --source phone`. The engineering is intact and
+> the aiortc marker-bit finding is a general lesson, not a phone-specific one.
+> Summary:
+> [../learnings/latency-and-pipeline.md](../learnings/latency-and-pipeline.md).
+
 Seven parallel research streams (aiortc internals, Safari sender behavior,
 academic real-time-video literature, alternative transports, tracking-side
 latency compensation, the HFT/quant low-latency playbook, and the measurement

@@ -1,5 +1,12 @@
 # Architecture
 
+> **The `DirectDriver` branch below is `--legacy` as of 2026-08-20.** The hand
+> no longer drives the cursor; the whole strip is one unsubscribed line in
+> `cli.py`. Everything else in this diagram is live. Why, and how to restore
+> it: [decisions.md](decisions.md) · [learnings/restoring.md](learnings/restoring.md).
+> Five modules are missing from the layout table below: `cli.py`, `grab.py`,
+> `menubar.py`, `overlay.py` and `tutorial.py`.
+
 ```
 ┌─────────────┐                                  ┌──────────────┐
 │ Leap Motion │──┐                            ┌──│ DirectDriver │── the hand IS the cursor

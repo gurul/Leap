@@ -1,5 +1,10 @@
 # The gesture vocabulary
 
+> Everything below the divider on line 30 describes `--legacy`. Why each piece
+> moved: [decisions.md](decisions.md). How to bring it back:
+> [learnings/restoring.md](learnings/restoring.md). Why the poses and dwells
+> are what they are: [learnings/gesture-vocabulary.md](learnings/gesture-vocabulary.md).
+
 ## What this is now (2026-08-20)
 
 Five gestures, and **the hand never touches the cursor**. A mouse does

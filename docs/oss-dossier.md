@@ -1,5 +1,12 @@
 # OSS survey dossier
 
+> **Frozen 2026-08-12.** Every verdict asserts repository activity *as of that
+> date* and some transcripts embed scratchpad paths from another machine.
+> Useful as "here is what was already checked and rejected"; misleading if read
+> as a current recommendation. The verdicts that mattered are carried forward
+> in [learnings/dead-ends.md](learnings/dead-ends.md), and the method itself in
+> [learnings/measurement-method.md](learnings/measurement-method.md#adversarial-swarms-against-real-repositories-not-search-snippets).
+
 Five parallel surveys, every candidate adversarially verified against the real
 repository (GitHub API, clones, and on-machine probes) rather than search snippets.
 Produced by a 34-agent swarm on 2026-08-12. Verdicts: ADOPT / TRIAL / REJECT.

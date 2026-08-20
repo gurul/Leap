@@ -1,5 +1,11 @@
 # 2026-08-19 phantom clicks — live-telemetry diagnosis and the deep-commit gate
 
+> **Dated finding about clicking, which is `--legacy` as of 2026-08-20**
+> ([../decisions.md](../decisions.md)). It is kept because the method is the
+> point: 11 recorded clicks with their signal windows settled an argument that
+> guesswork had lost twice. Summary:
+> [../learnings/gesture-vocabulary.md](../learnings/gesture-vocabulary.md#phantom-clicks-had-two-different-causes-and-two-different-fixes).
+
 First session of the new telemetry layer (phone @60fps quartz + Mac-camera
 dry-run observer, ~2 min of real use): 11 recorded clicks on the phone path,
 each with a 2s pre / 0.5s post signal window.

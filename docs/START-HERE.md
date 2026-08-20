@@ -34,7 +34,11 @@ and built on.
    would make us reverse it. Read this before proposing anything; several
    obvious ideas were already tried and reverted, with numbers.
 2. **[learnings/](learnings/)** — the durable knowledge, organised by subject.
-   Survives whatever ships.
+   Survives whatever ships. Two pages answer the two most common questions
+   directly: [learnings/restoring.md](learnings/restoring.md) (what is shelved
+   and the exact flag that brings it back) and
+   [learnings/dead-ends.md](learnings/dead-ends.md) (what was tried and
+   rejected).
 3. **[troubleshooting.md](troubleshooting.md)** — when it doesn't work, plus
    the live telemetry dashboard and the accuracy bench.
 
@@ -70,7 +74,36 @@ scripts/leapctl on                     # detached session; off / status / log
 ```
 
 Tests need no camera and no Leap hardware. If they pass, the logic is intact;
-everything hardware-specific is behind a source interface with fakes.
+everything hardware-specific is behind a source interface with fakes. Measured
+2026-08-20: **337 passed in 5.4 s**. One caveat —
+`tests/test_calibrate.py:114` opens `camera_session.jsonl` by relative path
+and that file is gitignored, so it errors on a fresh clone or from any cwd but
+the repo root.
+
+Against real hardware, `scripts/verify-env.sh` asserts Hyperion version,
+device presence, frame rate and Accessibility permission, and exits non-zero
+on drift.
+
+## Where the evidence lives
+
+Every number in the docs traces back to one of these.
+
+| What | Where |
+|---|---|
+| The 3,639-frame Leap corpus behind almost every threshold | `docs/context/session.jsonl` (committed; replayed by `tests/test_replay.py`) |
+| The invalid first capture, kept as evidence for two defects | `docs/context/session-INVALID-2026-08-12.jsonl` |
+| The camera-path capture the calibration fitter reads | `camera_session.jsonl` (gitignored, machine-local) |
+| Every button commit, with 2 s before and 0.5 s after | `~/.leapinput/telemetry/clicks-<date>.jsonl` |
+| Your fitted thresholds and reach box | `camera_tuning.json` (gitignored) |
+| Dated research notes — the raw findings the learnings pages distil | [context/](context/) |
+
+Re-derive rather than re-measure:
+
+```bash
+python -m leapinput.record analyze docs/context/session.jsonl   # refit from a corpus
+python -m leapinput.doctor                                      # 10s live sample, pass rate per stage
+python -m leapinput.viz                                         # what the sensor actually sees
+```
 
 ## The map
 

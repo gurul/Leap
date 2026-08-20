@@ -1,5 +1,14 @@
 # Fitting it to your hand
 
+> **Mostly `--legacy` as of 2026-08-20.** `calibrate capture` still matters in
+> the shipped tool — the fitted `pinch_on_mm` feeds the pinch/fist shadow that
+> keeps a releasing button from arming a command. Everything from "Fixed
+> camera? Fit the reach box" onward (the reach box, touch mapping, the comfort
+> inset, PRISM) only affects the cursor, which is unwired by default. One
+> exception: "One box per hand" at the bottom is live and load-bearing — the
+> two-hand frame shot depends on it. See [decisions.md](decisions.md) and
+> [learnings/restoring.md](learnings/restoring.md).
+
 The thresholds ship as guesses; your hand is the ground truth.
 
 ## Learn it first
@@ -14,6 +23,11 @@ A guided walkthrough over the live preview: point, click, drag, park, then
 the pose commands — each step advancing only when the real pipeline detects
 the real gesture. It forces dry-run, so nothing touches your actual cursor
 while you learn.
+
+(The tutorial still teaches the **legacy** vocabulary: its first three steps
+are point, pinch-to-click and fist-to-drag, none of which the default session
+wires up. It is still the safest way to see the pipeline recognising real
+gestures.)
 
 ## Calibrate the pose thresholds
 

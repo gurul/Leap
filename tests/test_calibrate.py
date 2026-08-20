@@ -1,6 +1,7 @@
 """Calibration fitting tests: synthetic corpora with known separations in,
 thresholds inside the measured gaps out."""
 
+from pathlib import Path
 import random
 
 import pytest
@@ -111,7 +112,16 @@ def test_fit_preserves_setup_calibration(tmp_path):
 
     from leapinput.calibrate import fit
 
-    rows = [_json.loads(line) for line in open("camera_session.jsonl")]
+    # This corpus is gitignored (it describes a hand, not the project) and was
+    # opened by a bare relative path, so the test failed on a fresh clone and
+    # from any cwd but the repo root — the one test in the suite that needed
+    # a machine to have been used before. Resolve it from the repo, and skip
+    # rather than fail when it is genuinely absent.
+    corpus = Path(__file__).resolve().parents[1] / "camera_session.jsonl"
+    if not corpus.exists():
+        pytest.skip(f"no recorded camera corpus at {corpus} "
+                    f"(python -m leapinput.calibrate capture)")
+    rows = [_json.loads(line) for line in corpus.open()]
     base = Tuning(reach_x0=0.55, reach_y0=0.48, reach_x1=0.85, reach_y1=0.79,
                   ref_span_img=0.058, hand_span_mm=72.0, reach_center="palm")
     tuning, _ = fit(rows, base=base)

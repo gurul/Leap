@@ -1,5 +1,20 @@
 # Leap Gesture → macOS Computer Use — Build Plan (FINAL)
 
+> **Frozen 2026-08-12, and superseded as an architecture description.** §6
+> prescribes `src/leapinput/{capture,condition,recognize,intent,inject,ui,obs,config}/`
+> subpackages; the tree is 22 flat modules. The checkout path it names
+> (`/Users/joerup/era/leap-input`) is not this one, and the tool it describes
+> is the cursor-driving version, which is now `--legacy`
+> ([decisions.md](decisions.md)).
+>
+> **Still the only source for some measurements.** §2 ("What is dead — stated
+> plainly") and §8 ("Context space — durable facts") hold platform and hardware
+> numbers recorded nowhere else — `CGEventPost` at 10.4 µs/post,
+> `LEAP_HAND.flags` always 0 across 2,419 hand-frames, the PyAutoGUI 76 Hz
+> ceiling. Those are distilled in
+> [learnings/macos-platform.md](learnings/macos-platform.md) and
+> [learnings/dead-ends.md](learnings/dead-ends.md).
+
 **Target:** this MacBook Pro (M5 Pro, macOS 26.5.2 / 25F84, arm64), this controller (original 2013 LMC, `LP20006680004`, type `LMC`, PID `0x3`), Hyperion 6.2.0.0, `libLeapC.6.dylib`.
 
 **What changed from the draft plan, in one paragraph.** Pointer control is **relative with a clutch ratchet**, not absolute — the draft specified both and they are mutually exclusive. The `VirtualScreen` port is deleted and the union-rect mapping problem with it. The clutch is a **palm-orientation** pose, digit-disjoint from every click, because the draft's peace-sign clutch shared fingers with its own click gesture. **AirPush is the primary click and pinch is the fallback** — the ranking was inverted; pinch is model-inferred exactly where thumb and index occlude. **Swipes and the fist-disengage are cut** (swipe exits the tracking volume and trips the dead-man; fist-disengage collides with scroll). Scroll is **position control from an anchor**, not rate control. A **panic/release-all path with an external supervisor** is Phase 0, not an afterthought — it is the only uncovered failure class in the draft. The **agent tier is descoped to a socket seam**. TouchFree is reclassified **REFERENCE, not ADOPT**. A **concurrency model** is specified, because five components each demand a run loop and the draft assigned none.
