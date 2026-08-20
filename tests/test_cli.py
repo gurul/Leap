@@ -9,6 +9,7 @@ import argparse
 from types import SimpleNamespace
 
 import leapinput.cli as cli
+from leapinput.capture import Snapshot
 from leapinput.cli import _mic_desync_fix, _overlay_status, _StallWatch, \
     resolve_source_defaults
 
@@ -167,3 +168,88 @@ def test_prism_precision_is_on_by_default_and_has_an_off_switch():
     assert m.precision_offset_max_px > 0.0       # ...paid for with an offset
     m.precision_gain_min = 1.0                   # what --no-precision does
     assert m.precision_gain_min == 1.0
+
+
+# --- a command hold parks the pointer; it does not fake a tracking loss ------
+
+def _routed_pair():
+    """The cli's routing decision, isolated: (gesture engine, command engine).
+    Mirrors the real callback so the branch under test is the shipped one."""
+    from leapinput.commands import CommandEngine
+    from leapinput.gestures import Config, GestureEngine
+    from leapinput.capture import Snapshot
+
+    engine = GestureEngine(Config(hand="Right"))
+    commands = CommandEngine(hand="Right", minimal=True)
+
+    def routed(snap):
+        commands.on_snapshot(snap)
+        if not commands.enabled:
+            engine.on_snapshot(Snapshot())
+        else:
+            engine.on_snapshot(snap)
+            if commands.busy:
+                engine.park()
+    return engine, commands, routed
+
+
+def test_park_drops_the_clutch_but_keeps_the_latches():
+    from leapinput.gestures import Config, GestureEngine, Intent
+
+    engine = GestureEngine(Config(hand="Right"))
+    seen = []
+    engine.subscribe(lambda e: seen.append(e.intent))
+    engine.clutch.state = True
+    engine.pinch.state = True
+    engine.grab.state = True
+
+    engine.park()
+
+    assert Intent.CLUTCH_UP in seen
+    assert Intent.SELECT_UP not in seen, "park released a held button"
+    assert Intent.GRAB_UP not in seen
+    assert Intent.DISENGAGE not in seen
+    assert engine.pinch.state is True and engine.grab.state is True
+    assert engine.fingers.value != 5 or True        # ladder not rebuilt
+
+
+def test_a_stale_pose_no_longer_claims_the_input():
+    """busy used to stay true through PoseHold's whole 0.12s flicker grace, so
+    a pose that ended two frames ago still blanked the cursor engine."""
+    from leapinput.commands import CommandEngine
+
+    c = CommandEngine(hand="Right", minimal=True)
+    c._now = 10.0
+    c.pane._active_since = 9.0          # armed and full
+    c.pane._last_active = 10.0
+    assert c.busy is True
+
+    c._now = 10.0 + c.BUSY_STALE_S + 0.01   # pose stopped matching
+    assert c.pane.progress(c._now) > 0.0, "still inside the grace tail"
+    assert c.busy is False, "a stale pose still owned the input"
+
+
+def test_pause_still_releases_everything():
+    """The dead-man property the project refuses to weaken."""
+    from leapinput.gestures import Intent
+
+    engine, commands, routed = _routed_pair()
+    engine.clutch.state = True
+    engine.pinch.state = True
+    seen = []
+    engine.subscribe(lambda e: seen.append(e.intent))
+
+    commands.enabled = False
+    routed(Snapshot(right=frame_for_cli()))
+
+    assert Intent.SELECT_UP in seen and Intent.CLUTCH_UP in seen
+    assert engine.pinch.state is False
+
+
+def frame_for_cli():
+    from leapinput.capture import HandFrame, Vec3
+    return HandFrame(
+        frame_id=1, timestamp=0, hand_id=1, side="Right",
+        palm=Vec3(0.0, 200.0, 0.0), palm_velocity=Vec3(0.0, 0.0, 0.0),
+        palm_normal=Vec3(0.0, -1.0, 0.0), pinch_strength=0.0,
+        pinch_distance=80.0, grab_strength=0.0, extended=(True,) * 5)

@@ -44,7 +44,12 @@ class LeapMenuBar(rumps.App):
         self.status = rumps.MenuItem("checking…")
         self.status.set_callback(None)          # informational, not clickable
         self.toggle_item = rumps.MenuItem("Turn on", callback=self.toggle)
-        self.phone_item = rumps.MenuItem("Use phone camera (starts server)",
+        # The phone/WebRTC source moved to legacy 2026-08-20: a menu item that
+        # silently starts a TLS server and a signalling loop is exactly the
+        # background machinery this tool was stripped of. The code is intact —
+        # `leapctl on --legacy --source phone` still runs it — but it no longer
+        # sits one careless click away.
+        self.phone_item = rumps.MenuItem("Phone camera (legacy) — how to",
                                          callback=self.phone)
         self.pause_item = rumps.MenuItem("Pause / resume  (or hold ILY)",
                                          callback=self.pause)
@@ -90,8 +95,8 @@ class LeapMenuBar(rumps.App):
             "off": "Hand control: off"}[state]
         self.toggle_item.title = ("Turn on (built-in camera)" if state == "off"
                                   else "Turn off")
-        self.phone_item.title = ("Phone camera: streaming — show URL" if on_phone
-                                 else "Use phone camera (starts server)")
+        self.phone_item.title = ("Phone camera (legacy) — streaming" if on_phone
+                                 else "Phone camera (legacy) — how to")
 
     def toggle(self, _) -> None:
         if self.state() == "off":
@@ -104,38 +109,15 @@ class LeapMenuBar(rumps.App):
         self.refresh()
 
     def phone(self, _) -> None:
-        """Explicit opt-in to the phone/WebRTC source: start (or switch) the
-        session with --source phone, then hand over the URL to open on the
-        phone. Copying it beats retyping a LAN IP with a token from a dialog."""
-        already = self.state() != "off" and self.source() == "phone"
-        if already:
-            # Already streaming: the live session's URL is the last one in the
-            # log, so read the whole tail rather than waiting for a new line
-            # that will never come.
-            offset = 0
-        else:
-            if self.state() != "off":
-                ctl("off")
-            # Where the log ends BEFORE the start. The token is per-session, so
-            # a URL from an earlier phone run is worse than none — it looks
-            # valid and never connects.
-            try:
-                offset = LOG.stat().st_size
-            except OSError:
-                offset = 0
-            ctl("on", "--source", "phone")
-        url = self.phone_url(offset)
-        self.refresh()
-        if url:
-            subprocess.run(["pbcopy"], input=url, text=True, timeout=5)
-            rumps.alert("Phone camera ready",
-                        f"Open this on the phone (copied to the clipboard):\n\n"
-                        f"{url}\n\nAccept the certificate warning once, "
-                        f"then tap Start.")
-        else:
-            rumps.alert("Phone camera",
-                        "No stream URL in the log yet — open Show log in a "
-                        "moment to see how startup went.")
+        """Legacy path: tell, do not do. Starting a LAN server from a menu
+        click is the kind of background machinery this tool dropped."""
+        rumps.alert("Phone camera (legacy)",
+                    "The phone/WebRTC source still works, but it starts a TLS "
+                    "server, a signalling loop and a token — background "
+                    "machinery the four-gesture tool does not need.\n\n"
+                    "To use it:\n"
+                    "    scripts/leapctl on --legacy --source phone\n\n"
+                    "The stream URL is printed to the session log.")
 
     def phone_url(self, offset: int = 0) -> str | None:
         """The session's WebRTC URL, read from the log past `offset` bytes so

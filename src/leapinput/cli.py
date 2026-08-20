@@ -271,6 +271,13 @@ def main(argv=None) -> int:
                          "to MORE than the screen, so edges land inside the "
                          "comfortable envelope at the cost of magnifying "
                          "everything by 1/(1-2*inset)")
+    ap.add_argument("--detect-hz", type=float, default=0.0,
+                    help="cap hand detection to this rate to save CPU. OFF by "
+                         "default: the two-hand FRAME SHOT is the feature this "
+                         "tool exists for, and MediaPipe tracks better with "
+                         "every frame — a 20Hz cap made the framing pose "
+                         "flicker (2026-08-20). Frames are read and dropped "
+                         "either way, so a cap costs quality, never latency")
     ap.add_argument("--legacy", action="store_true",
                     help="bring back the full pre-2026-08-20 tool: the hand "
                          "drives the CURSOR (point/pinch/drag/lift) and the "
@@ -335,6 +342,17 @@ def main(argv=None) -> int:
     if args.map in ("absolute", "touch") and args.source == "leap":
         print("--map absolute needs a camera source (it maps the reach box, "
               "a camera concept)", file=sys.stderr)
+        return 2
+
+    # The phone/WebRTC source is legacy (2026-08-20): a TLS server, a signalling
+    # path, a token and an aiortc receive loop, all running in the background of
+    # a tool whose whole job is four poses. The built-in camera does that job
+    # with none of it. Code untouched, one flag away.
+    if args.source == "phone" and not args.legacy:
+        print("--source phone is legacy: it starts a TLS + WebRTC server and a "
+              "signalling loop this tool no longer needs.\n"
+              "  Use the built-in camera (the default), or bring it back with:\n"
+              "    leapinput --legacy --source phone", file=sys.stderr)
         return 2
 
     tuning = None
@@ -423,12 +441,8 @@ def main(argv=None) -> int:
     # while your hands are somewhere else.
     if args.legacy:
         engine.subscribe(direct.on_intent)
-    elif hasattr(source, "detect_interval_us"):
-        # Nothing consumes per-frame POSITION any more, so stop paying for it.
-        # 20 Hz: still half the work, and it keeps the shortest dwell (Enter,
-        # 0.3s) at ~6 frames rather than the ~3 a 15Hz budget actually
-        # delivered once detection time was added on top.
-        source.detect_interval_us = int(1e6 / 20)
+    if args.detect_hz and hasattr(source, "detect_interval_us"):
+        source.detect_interval_us = int(1e6 / args.detect_hz)
 
     command_engine = None
     screen_overlay = None
@@ -592,8 +606,16 @@ def main(argv=None) -> int:
             command_engine.on_snapshot(snap)
             if screen_overlay is not None:
                 screen_overlay.update(command_engine.overlay)
-            ok = command_engine.enabled and not command_engine.busy
-            engine.on_snapshot(snap if ok else Snapshot())
+            if not command_engine.enabled:
+                # PAUSED: the dead-man release IS the point — everything held
+                # comes up and stays up until you resume.
+                engine.on_snapshot(Snapshot())
+            else:
+                # A command hold parks the pointer; it does not pretend the
+                # hand vanished. See GestureEngine.park.
+                engine.on_snapshot(snap)
+                if command_engine.busy:
+                    engine.park()
             if telemetry is not None:
                 # After the engines, so sampled Schmitt states describe THIS
                 # frame; the real snap, so a blanked cursor engine still

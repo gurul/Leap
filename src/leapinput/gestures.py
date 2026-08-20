@@ -433,6 +433,25 @@ class GestureEngine:
         if self.clutch.force_off():
             self._emit(Intent.CLUTCH_UP, frame)
 
+    def park(self) -> None:
+        """Stop driving the pointer WITHOUT dismantling the hand state.
+
+        For the case where a command pose owns the input: the cursor must not
+        also be steered by the hand forming the pose, but nothing has gone
+        wrong, so nothing should be torn down. The CLI used to express this by
+        feeding an empty Snapshot, which is the TRACKING-LOSS path — it
+        force-released the pinch and grab latches, rebuilt the finger ladder
+        from 5, and fired DISENGAGE, so recovery cost a full re-engage every
+        time a pose flickered. Measured 2026-08-20 over 256s of session: 21
+        clutch drops, ZERO from an actual hand loss, 17 on a busy frame, and 8
+        of those killed a latched button mid-gesture.
+
+        A real tracking loss still takes the old path — that dead-man property
+        is the one this project refuses to weaken.
+        """
+        if self.clutch.force_off():
+            self._emit(Intent.CLUTCH_UP, None)
+
     def on_snapshot(self, snap: Snapshot) -> None:
         frame = snap.get(self.cfg.hand)
         now = self._clock(frame)

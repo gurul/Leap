@@ -83,10 +83,22 @@ case "${1:-status}" in
       stop_one "$(cat "$PID_FILE")"
       stopped=1
     fi
-    # Sweep strays: sessions whose pid file was overwritten keep the camera on.
-    for pid in $(pgrep -f "$BIN --source" 2>/dev/null || true); do
-      stop_one "$pid"
-      stopped=1
+    # Sweep strays. "Off" must mean OFF: no camera light, no telemetry port,
+    # no guard, nothing left holding CPU. Three patterns, because a session can
+    # be started three ways and only the first writes the pid file:
+    #   - the wrapper argv leapctl itself uses
+    #   - any `bin/leapinput --...` (a hand-run CLI session). The trailing
+    #     `--` matters: without it this also matches leapinput-menubar, which
+    #     is the switch and must survive its own off.
+    #   - the helper processes (python -m leapinput.guard / .overlay). Both
+    #     exit with their parent today; sweeping them anyway is what makes
+    #     "off" true even if that ever stops being the case.
+    for pat in "$BIN --source" "bin/leapinput --" "leapinput.guard" \
+               "leapinput.overlay"; do
+      for pid in $(pgrep -f "$pat" 2>/dev/null || true); do
+        stop_one "$pid"
+        stopped=1
+      done
     done
     rm -f "$PID_FILE" "$PAUSED_FILE"
     if [ "$stopped" = 1 ]; then

@@ -105,6 +105,11 @@ class PoseHold:
         self.fire_on_fill = fire_on_fill
         self._active_since: Optional[float] = None
         self._inactive_since: Optional[float] = None
+        # Last frame the pose actually matched. `busy` needs this: progress()
+        # stays > 0 through the whole `grace` tail, so a pose that flickered
+        # out one frame ago still reads as held — fine for deciding whether a
+        # command FIRES, wrong for deciding whether the cursor may exist.
+        self._last_active: float = -1e9
         self._fired = False
 
     @property
@@ -129,6 +134,7 @@ class PoseHold:
         single-frame landmark dropouts still survive it), the hold resets
         WITHOUT firing. Never commit on a hand that is no longer there."""
         if active:
+            self._last_active = now
             self._inactive_since = None
             if self._active_since is None:
                 self._active_since = now
@@ -274,6 +280,11 @@ class CommandEngine:
     # short enough that a deliberate grab feels immediate.
     DRAG_ARM_S = 0.18
 
+    # How stale a pose match may be and still hold the input. Two frames at
+    # the 20Hz detection budget; shorter than PoseHold.grace on purpose, so a
+    # flicker releases the cursor immediately instead of 0.12s later.
+    BUSY_STALE_S = 0.1
+
     def __init__(self, hand: str = "Right", pinch_on_mm: float = 50.0,
                  clock: Callable[[], float] = time.monotonic,
                  minimal: bool = False):
@@ -351,8 +362,17 @@ class CommandEngine:
         never reads that hand, so blanking it protects nothing — it only
         force-releases an in-progress drag on the cursor hand. Pane stays:
         two-handed, it includes the cursor hand.
+
+        The pose must ALSO have matched within the last frame or two. progress()
+        stays above zero through the whole `grace` flicker tail, so without
+        this a pose that ended 0.12s ago still claimed the input. Measured
+        2026-08-20 across 256s of recorded session: 21 busy episodes with a
+        median duration of 0.104s — i.e. the population was dominated by the
+        grace tail rather than by anyone actually holding a pose, and 17 of the
+        21 clutch drops in that window landed on a busy frame.
         """
         return any(h.progress(self._now) > 0.0
+                   and self._now - h._last_active < self.BUSY_STALE_S
                    for h in (self.pane, self.mission, self.toggle,
                              self.dictate))
 
