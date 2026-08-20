@@ -282,8 +282,9 @@ def main(argv=None) -> int:
                     help="bring back the full pre-2026-08-20 tool: the hand "
                          "drives the CURSOR (point/pinch/drag/lift) and the "
                          "whole command vocabulary (copy, Mission Control, "
-                         "fist-drag, ILY pause). Off by default — the shipped "
-                         "tool is four gestures: mic, Enter, paste, frame shot")
+                         "fist-drag). Off by default — the shipped tool is "
+                         "five gestures: mic, Enter, paste, frame shot, and "
+                         "the ILY pause")
     ap.add_argument("--pinch-drag", action="store_true",
                     help="let a held pinch drag (off by default: the cursor is "
                          "pinned for the whole hold, so a pinch can only ever "
@@ -437,7 +438,7 @@ def main(argv=None) -> int:
     # the cursor: no pointer motion, no mouse buttons, no clutch, no drag. The
     # engine still runs (telemetry and the command layer read its state), and
     # every module above is intact — `--legacy` re-subscribes it. A mouse does
-    # pointing better; this tool is for the four things a mouse cannot do
+    # pointing better; this tool is for the five things a mouse cannot do
     # while your hands are somewhere else.
     if args.legacy:
         engine.subscribe(direct.on_intent)
@@ -632,13 +633,17 @@ def main(argv=None) -> int:
 
     w, h = backend.screen
     print(f"screen {w:.0f}x{h:.0f} | backend={args.backend} | hand={args.hand}")
+    # ONE mapping, bound before either banner. It was two literal copies, and
+    # the legacy one never learned about --pane grab: `--legacy --pane grab`
+    # died with KeyError at the banner, before the camera ever opened.
+    pane_label = {"screenshot": "screenshot that region -> clipboard",
+                  "window": "new window there",
+                  "tab": "new tab there",
+                  "grab": "file a change request (grab mode)"}[args.pane]
     if not args.legacy:
-        pane_label = {"screenshot": "screenshot that region -> clipboard",
-                      "window": "new window there",
-                      "tab": "new tab there",
-                      "grab": "file a change request (grab mode)"}[args.pane]
         print("\n  HANDS OFF THE CURSOR — your mouse still owns the pointer.")
-        print("  Four gestures. Hold each until the ring fills, then release:")
+        print("  Five gestures. Hold each until the ring fills, then release")
+        print("  (the pause fires as the ring fills, without waiting for it):")
         print(f"    {'thumbs-up'.ljust(35)}= mic ON (chime); "
               "thumbs-up again = mic OFF")
         print(f"    {'ILY on your other hand'.ljust(35)}= Enter")
@@ -672,9 +677,6 @@ def main(argv=None) -> int:
             print("  point = move   pinch = click (hold it + move = drag)   "
                   "open hand = lift")
         if commands_on:
-            pane_label = {"screenshot": "screenshot that region -> clipboard",
-                          "window": "new window there",
-                          "tab": "new tab there"}[args.pane]
             free = "left" if args.hand == "Right" else "right"
             print("  commands (hold the pose until the ring fills, then release):")
             print(f"  {args.hand.lower()} (cursor) hand:")

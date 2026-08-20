@@ -1,5 +1,15 @@
 # Sources: webcam, phone, Leap Motion
 
+> **The phone/WebRTC source is legacy as of 2026-08-20.** `--source phone`
+> exits unless you pass `--legacy`, and the menu bar item explains rather than
+> launching. The code, the certificates and the latency engineering are all
+> intact — see [decisions.md](decisions.md) for why it was shelved and how to
+> bring it back:
+>
+> ```bash
+> scripts/leapctl on --legacy --source phone
+> ```
+
 The built-in webcam is the daily driver (2026-08-19). The phone and the Leap
 are features: reach for the phone when a faster-than-webcam source helps, and
 for the Leap when you want the precision benchmark.

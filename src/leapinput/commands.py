@@ -317,14 +317,17 @@ class CommandEngine:
     def __init__(self, hand: str = "Right", pinch_on_mm: float = 50.0,
                  clock: Callable[[], float] = time.monotonic,
                  minimal: bool = False):
-        # minimal (the default the CLI ships, 2026-08-20): three gestures —
-        # mic, Enter, frame shot — and nothing else. The rest of the
-        # vocabulary is not deleted, only unwired; `--legacy` restores it.
-        # Everything cut here served CURSOR work, which a mouse does better:
-        # copy/paste, Mission Control, the fist drag, and the ILY pause (the
-        # menu bar is a more reliable off switch than a pose). Dropping the
-        # pause also lets ILY mean Enter on EITHER hand, which retires the
-        # hand-routing rules that were a bug class of their own.
+        # minimal (the default the CLI ships, 2026-08-20): FIVE gestures —
+        # mic, Enter, paste, frame shot, and the ILY pause — and nothing else.
+        # Cut: COPY, MISSION_CONTROL and the fist DRAG. All three served
+        # CURSOR work, which a mouse does better; none is deleted, only
+        # unwired, and `--legacy` restores them.
+        #
+        # Everything except ILY answers to EITHER hand here: with no cursor
+        # there is no "free" hand to be free OF, and the lone-hand adoption
+        # rules existed to protect a pointer that no longer moves. ILY keeps
+        # its hand routing because pause and Enter are told apart by exactly
+        # that — which is what buys a pause without spending a second pose.
         self.minimal = minimal
         self.hand = hand
         self.pinch_on_mm = pinch_on_mm
@@ -540,12 +543,15 @@ class CommandEngine:
         frame_shadow = (self._frame_armed_at is not None
                         and now - self._frame_armed_at < self.FRAME_SHADOW_S)
 
-        # PAUSE. Legacy keeps ILY on the cursor hand. Minimal moves it to a
-        # held FIST, on either hand: ILY had to become Enter (there is no
-        # cursor hand left to distinguish the two), and the fist is the
-        # cleanest pose on this hardware — 0 extended on 541/542 corpus frames
-        # — which is what a toggle nobody is watching needs. It is also the
-        # only pose minimal mode does not otherwise use.
+        # PAUSE: ILY on the configured --hand, in BOTH modes. A fist pause
+        # was considered when ILY briefly meant Enter on either hand, and was
+        # dropped the moment the pause came back — the fist is not the pause
+        # anywhere, and is unbound in minimal mode.
+        #
+        # The pinch shadow gates it only while enabled: a held click-pinch
+        # sheds ILY-shaped misread frames (middle and ring stay curled), and
+        # while DISABLED there is nothing held to protect and the pose is the
+        # only way back in.
         paused_pose = (not frame_shadow and mine is not None
                        and is_ily_pose(mine)
                        and (not self.enabled or not pinch_shadow))

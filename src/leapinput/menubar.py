@@ -4,11 +4,10 @@
 ILY pose that resumes it); ✊ = off. The menu toggles the session (via
 scripts/leapctl, the single owner of start/stop), pauses/resumes without
 stopping (SIGUSR1 — the ILY pose's terminal-side twin), and opens the log.
-"Turn on" starts the default camera source (the built-in webcam — chosen as
-the daily driver 2026-08-19). The phone/WebRTC server never starts on its
-own: "Use phone camera" in the menu starts it explicitly, then puts the
-session URL on the clipboard and in a dialog so it can be opened on the
-device that will stream.
+"Turn on" starts the built-in webcam. The phone/WebRTC source moved to legacy
+on 2026-08-20 — its menu item now EXPLAINS how to start it and starts nothing,
+because a menu click that quietly stands up a TLS server and a signalling loop
+is the background machinery this tool was stripped of (docs/decisions.md).
 Built on rumps, which is a thin layer over the PyObjC we already ship.
 
 Run it with `leapinput-menubar` (keep it in the background: `nohup ... &`).
