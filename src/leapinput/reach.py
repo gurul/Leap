@@ -175,14 +175,16 @@ def physical_summary(tuning: Tuning) -> Optional[str]:
     travel maps ~1:1 onto glass, the most literal touchscreen feel."""
     if not (tuning.reach_active and tuning.ref_span_img):
         return None
-    from .actions import main_screen_size
+    from .actions import active_screen_size
     x0, _, x1, _ = tuning.reach
     span = tuning.span_mm_effective
     width_cm = (x1 - x0) / tuning.ref_span_img * span / 10.0
     basis = ("your measured" if tuning.hand_span_mm else "assuming a")
     line = (f"box ~{width_cm:.0f}cm wide in hand space "
             f"({basis} {span:.0f}mm knuckle span)")
-    if main_screen_size()[0] == 1512.0:
+    # The panel comparison only means anything on the panel itself — read the
+    # display the cursor is on, since that is the one being mapped.
+    if active_screen_size()[0] == 1512.0:
         line += (f" — {width_cm / MBP14_WIDTH_CM:.2f}x the 14.2-inch panel's "
                  f"{MBP14_WIDTH_CM:.1f}cm: touch scale")
     return line
@@ -524,11 +526,13 @@ def _corner_banner(cv2, bgr, captured, point, anchor, cleared, now) -> None:
 # --- the viewport test front-end ------------------------------------------------
 
 class _ScreenGrab:
-    """Latest screenshot of the main display as a BGR array, refreshed on a
+    """Latest screenshot of the ACTIVE display as a BGR array, refreshed on a
     daemon thread. This is what makes the test view literal: the actual screen,
     drawn inside the reach box — the 2D viewport floating in the camera's
-    world. Degrades to None (grid fallback) without Screen Recording
-    permission, with the fix named once instead of a silent black box."""
+    world. Active, not main: the box maps onto the screen the cursor is on, so
+    move the cursor to the other display and the viewport follows it there.
+    Degrades to None (grid fallback) without Screen Recording permission, with
+    the fix named once instead of a silent black box."""
 
     PERIOD_S = 2.0
 
@@ -543,10 +547,17 @@ class _ScreenGrab:
 
     def _loop(self) -> None:
         import cv2
+        from .actions import active_display
         while not self._stop.is_set():
             try:
+                x0, y0, x1, y1 = active_display()
+                # -R with the display's GLOBAL rect, not -m: -m is the main
+                # display and nothing else, and -D's display numbering is its
+                # own ordering, unrelated to CGGetActiveDisplayList's.
                 out = subprocess.run(
-                    ["screencapture", "-x", "-m", "-t", "jpg", str(self._path)],
+                    ["screencapture", "-x", "-t", "jpg",
+                     f"-R{int(x0)},{int(y0)},{int(x1 - x0)},{int(y1 - y0)}",
+                     str(self._path)],
                     capture_output=True, text=True, timeout=10.0)
                 img = cv2.imread(str(self._path)) if out.returncode == 0 else None
                 self.image = img

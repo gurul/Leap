@@ -88,6 +88,22 @@ Absolute (`touch`) mapping only became viable once a **fitted reach box** gave
 the camera one comfortable, screen-shaped region.
 ([interaction.md:176-181](../context/interaction.md))
 
+**The sheet maps onto ONE display — the one the cursor is on.** Spreading it
+across the union of a two-display layout halves the target grid in exchange for
+a screen you are usually not looking at, and an L-shaped union has voids no
+hand position may legally address. So the cursor picks the screen: touch mode
+owns the cursor while a hand is tracked, which means it only reaches another
+display because the *user* put it there (trackpad, or a window raised over
+there) — and that is a clear enough statement of intent to re-base the map on.
+Polled at 4 Hz, never mid-hold (re-basing during a drag would teleport it).
+The map used to be pinned to the main display, so on this desk the hand could
+not reach the laptop panel at all. (`driver.py:_follow_cursor_display`)
+
+Consequence worth knowing: the dynamic box's *shape* is still fixed at startup
+from the display the cursor was on then, so switching screens mid-session
+stretches slightly (16:9 read through a box fitted for 1.54:1). Refit with
+`reach map` if it matters.
+
 ---
 
 ## Gain: the ratio buys precision, and it fixed tracking

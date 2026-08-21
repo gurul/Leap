@@ -28,7 +28,36 @@ cursor in unreachable space. `QuartzBackend` exposes per-display rects via
 `CGGetActiveDisplayList`. (`driver.py:236-247`)
 
 **Open, unfixed (SI-3):** display geometry is cached once at init, so a
-mid-session display change clamps into stale rects.
+mid-session display change clamps into stale rects. The active-display lookup
+below reads the same cached rects and inherits this.
+
+---
+
+## "Which screen?" is answered by the cursor
+
+Anything screen-shaped — the frame shot, `--pane window` placement, the touch
+map, the reach viewport — needs a display to resolve against, and the main one
+is the wrong default. `actions.active_display()` returns the rect of the
+display the **cursor** is on (nearest rect when it sits in a layout void), and
+every one of those paths goes through it, so they cannot disagree with each
+other. Each used to take `backend.screen` — the main display's *size*, with an
+implied `(0, 0)` origin — which on this desk framed the laptop panel and
+captured the external monitor.
+
+**`screencapture -R` reads CG global coordinates, negative values included.**
+Verified against the panel at CG `(−1512, 0)`: `screencapture -R-1400,100,300,300`
+returns a 600×600 file — 2× scale, i.e. it really came off the Retina panel and
+not the 1× external. So the origin belongs in the rect, and no `-D <display>`
+juggling is needed; `-D`'s numbering ("1 is main, 2 secondary") is its own
+ordering, unrelated to `CGGetActiveDisplayList`'s.
+
+**The overlay helper must stay in AppKit's space.** It is the one component
+that positions a *window* rather than posting events, so it picks its display
+with `NSEvent.mouseLocation` against `NSScreen.frame` — both bottom-left, y up.
+Measured here: the same panel is `(−1512, 0)` in CG and `(−1512, +98)` in
+NSScreen. Mixing the two spaces puts the viewfinder on the wrong display, which
+is precisely the bug the follow-the-cursor behaviour exists to prevent.
+(`overlay.py:_helper_main`)
 
 ---
 

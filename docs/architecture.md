@@ -48,7 +48,7 @@ without hardware.
 | `src/leapinput/gestures.py` | `HandFrame` → `Intent`. Schmitt triggers, engagement state, the whole fiddly part |
 | `src/leapinput/commands.py` | `HandFrame` → `Command`. Pose-holds: pane + Mission Control fire on release, pause fires on ring-fill |
 | `src/leapinput/driver.py` | `Intent`/`Command` → backend calls. Gain curve, click stabilisation, pane placement |
-| `src/leapinput/actions.py` | Backend seam: `QuartzBackend` (real) and `DryRunBackend` (prints) |
+| `src/leapinput/actions.py` | Backend seam: `QuartzBackend` (real) and `DryRunBackend` (prints). Also display geometry — `active_display()` is the one answer to "which screen?" |
 | `src/leapinput/guard.py` | The separate process that releases the button if this one dies |
 | `src/leapinput/telemetry.py` | Live diagnostics dashboard + per-click signal-window recorder (the phantom-click evidence trail) |
 | `src/leapinput/oneeuro.py` | Vendored 1€ filter — adaptive smoothing, heavy when slow, light when fast |

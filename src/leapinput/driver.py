@@ -15,7 +15,7 @@ import time
 from dataclasses import dataclass
 from typing import Callable, Optional
 
-from .actions import Backend
+from .actions import Backend, active_display, display_rect_at
 from .camera import plane_norm
 from .oneeuro import OneEuroPlane
 from .capture import HandFrame, Vec3
@@ -185,7 +185,6 @@ class DirectDriver:
     def __init__(self, backend: Backend, mapping: Mapping | None = None):
         self.backend = backend
         self.map = mapping or Mapping()
-        self.w, self.h = backend.screen
         # Clamp to every display, not just the main one. Displays above or left of
         # the main have negative CG origins, so clamping at 0 traps the cursor on
         # the main screen — measured here: the second display lives at (-541,-1440).
@@ -196,6 +195,12 @@ class DirectDriver:
         # Seed from where the cursor ACTUALLY is, not screen center: the first
         # move must continue from what the user sees, never teleport.
         self.x, self.y = self._contain(*backend.pos())
+        # Touch mode maps the hand onto ONE display — the one the cursor is on,
+        # re-resolved as the cursor moves between screens (see
+        # _follow_cursor_display). Relative mode needs no such thing: it
+        # integrates deltas and _contain already spans every display.
+        self._active = display_rect_at(self.rects, self.x, self.y)
+        self._active_at = float("-inf")     # the first frame re-resolves
         self._filter = OneEuroPlane(freq=110.0, min_cutoff=self.map.pointer_min_cutoff,
                                     beta=self.map.pointer_beta,
                                     d_cutoff=self.map.pointer_d_cutoff)
@@ -235,16 +240,8 @@ class DirectDriver:
 
     def _contain(self, x: float, y: float) -> tuple[float, float]:
         """Clamp to the NEAREST real display, not the union of all of them."""
-        best, best_d = None, None
-        for x0, y0, x1, y1 in self.rects:
-            cx = max(x0, min(x1 - 1.0, x))
-            cy = max(y0, min(y1 - 1.0, y))
-            d = (cx - x) ** 2 + (cy - y) ** 2
-            if best_d is None or d < best_d:
-                best, best_d = (cx, cy), d
-                if d == 0.0:
-                    break
-        return best
+        x0, y0, x1, y1 = display_rect_at(self.rects, x, y)
+        return (max(x0, min(x1 - 1.0, x)), max(y0, min(y1 - 1.0, y)))
 
     def _gain(self, speed: float) -> float:
         lo, hi = self.map.speed_lo, self.map.speed_hi
@@ -364,8 +361,44 @@ class DirectDriver:
             self._travel += math.hypot(self.x - px, self.y - py)
         self.backend.move(self.x, self.y)
 
+    # How often touch mode checks which display the cursor sits on. 4Hz: each
+    # check builds a CGEvent to ask the window server, and a display change is
+    # something a human does, not something that happens per frame.
+    DISPLAY_POLL_S = 0.25
+
+    def _follow_cursor_display(self, now_s: float) -> None:
+        """Re-aim the touch map at the display the cursor is actually on.
+
+        The hand sheet maps onto ONE screen — mapping it across the union would
+        hand a two-display layout a target grid twice as coarse, and an
+        L-shaped union has voids no hand position may address. So: the cursor
+        picks the screen. Touch mode owns the cursor while a hand is tracked,
+        which means the cursor only reaches another display because the USER
+        put it there (trackpad, or an app raising a window over there) — and
+        that is exactly the gesture for "work on that screen now".
+
+        Never mid-hold: re-basing the map during a drag would teleport it.
+        """
+        if self._button_down or now_s - self._active_at < self.DISPLAY_POLL_S:
+            return
+        self._active_at = now_s
+        if len(self.rects) < 2:
+            return
+        cx, cy = self.backend.pos()
+        where = display_rect_at(self.rects, cx, cy)
+        if where == self._active:
+            return
+        self._active = where
+        # Continue from where the user parked the cursor, so the settle lerp
+        # slides onto the hand's target on the new screen instead of jumping
+        # from a stale position on the old one.
+        self.x, self.y = self._contain(cx, cy)
+        self._prec_off = (0.0, 0.0)
+        self._prec_last = None
+
     def _move_absolute(self, p: Vec3, timestamp_us: int, settle: float) -> None:
-        """Hand position -> cursor position on the main screen.
+        """Hand position -> cursor position on the ACTIVE screen (the one the
+        cursor is on — see _follow_cursor_display).
 
         Filtered in plane mm (where the 1 euro seeds were tuned), then scaled
         to pixels. The settle ramp lerps toward the target instead of scaling
@@ -373,9 +406,12 @@ class DirectDriver:
         A reach-box clamp upstream means an overreached hand pins the cursor
         at the screen edge rather than losing it.
         """
+        self._follow_cursor_display(timestamp_us / 1e6)
+        ax0, ay0, ax1, ay1 = self._active
+        aw, ah = ax1 - ax0, ay1 - ay0
         fx, fy = self._filter(p.x, p.y, timestamp_us / 1e6)
         nx, ny = plane_norm(Vec3(fx, fy, 0.0))
-        tx, ty = nx * (self.w - 1.0), ny * (self.h - 1.0)
+        tx, ty = ax0 + nx * (aw - 1.0), ay0 + ny * (ah - 1.0)
         # PRISM precision: sub-1:1 gain while the hand moves slowly (final
         # approach on a small target), 1:1 with offset bleed at speed. Speed
         # and offset accrual come from the RAW target — measuring the filtered
@@ -385,7 +421,7 @@ class DirectDriver:
         # keeps measuring only the settle-lerp gap.
         now_s = timestamp_us / 1e6
         rnx, rny = plane_norm(Vec3(p.x, p.y, 0.0))
-        rtx, rty = rnx * (self.w - 1.0), rny * (self.h - 1.0)
+        rtx, rty = ax0 + rnx * (aw - 1.0), ay0 + rny * (ah - 1.0)
         g = 1.0
         if self._prec_last is not None:
             ltx, lty, lt = self._prec_last
@@ -684,12 +720,18 @@ class ShortcutDriver:
         return self._dictate(False)
 
     def _new_pane(self, rect) -> None:
-        """Act on the framed region: capture it, or spawn a window over it."""
+        """Act on the framed region: capture it, or spawn a window over it.
+
+        The frame is normalized to ONE screen — the one the cursor is on, which
+        is the screen the user is looking at and, in touch mode, the one their
+        hand is currently mapped onto.
+        """
         if self.pane_action == "grab" and self.grab is not None:
             self._grab_component(rect)
             return
         if self.pane_action == "screenshot":
-            region = frame_region_px(rect, self.backend.screen, min_frac=0.05)
+            region = frame_region_px(rect, active_display(self.backend),
+                                     min_frac=0.05)
             if region is not None:
                 _screenshot_region(*region)
             return
@@ -699,7 +741,8 @@ class ShortcutDriver:
             return
         # Meaningful frames only for window placement: under ~15% per side the
         # user was almost certainly just releasing sloppily.
-        region = frame_region_px(rect, self.backend.screen, min_frac=0.15)
+        region = frame_region_px(rect, active_display(self.backend),
+                                 min_frac=0.15)
         if region is not None:
             _place_front_window(*region)
 
@@ -717,7 +760,8 @@ class ShortcutDriver:
         """
         from . import grab as grab_mod
 
-        region = frame_region_px(rect, self.backend.screen, min_frac=0.02)
+        region = frame_region_px(rect, active_display(self.backend),
+                                 min_frac=0.02)
 
         def run() -> None:
             try:
@@ -749,17 +793,27 @@ class ShortcutDriver:
         threading.Thread(target=run, name="grab-capture", daemon=True).start()
 
 
-def frame_region_px(rect, screen: tuple[float, float],
+def frame_region_px(rect, display: tuple[float, float, float, float],
                     min_frac: float) -> tuple[int, int, int, int] | None:
-    """Normalized frame rect -> (x, y, w, h) main-screen pixels, or None when
-    the frame is too small on either side to be a deliberate region."""
+    """Normalized frame rect -> (x, y, w, h) in CG GLOBAL pixels on `display`,
+    or None when the frame is too small on either side to be deliberate.
+
+    `display` is the (x0, y0, x1, y1) rect of the screen being acted on, and
+    its ORIGIN is part of the answer. A display left of the main one has a
+    negative origin; dropping it (this took the main display's size and an
+    implied 0,0) aimed every frame shot and every window placement at the main
+    screen no matter which display the user was working on. `screencapture -R`
+    and System Events both read this same global space, negative coordinates
+    included — verified against a display at (-1512, 0)."""
     if rect is None:
         return None
     x0, y0, x1, y1 = rect
     if (x1 - x0) < min_frac or (y1 - y0) < min_frac:
         return None
-    w, h = screen
-    return (int(x0 * w), int(y0 * h), int((x1 - x0) * w), int((y1 - y0) * h))
+    dx0, dy0, dx1, dy1 = display
+    w, h = dx1 - dx0, dy1 - dy0
+    return (int(dx0 + x0 * w), int(dy0 + y0 * h),
+            int((x1 - x0) * w), int((y1 - y0) * h))
 
 
 def _screenshot_region(x: int, y: int, w: int, h: int) -> None:

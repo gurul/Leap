@@ -17,7 +17,7 @@ the screen to feed an agent.
 | thumbs-up | ~0.4s | **mic** ON (chime); thumbs-up again = OFF |
 | ILY on your **other** hand | ~0.3s | **Enter** — submit what you dictated |
 | V sign (peace) | ~0.3s | **Cmd+V** (paste) |
-| frame a rectangle with both hands | ~0.55s | **frame shot** — that region to the clipboard |
+| frame a rectangle with both hands | ~0.55s | **frame shot** — that region of the display your cursor is on, to the clipboard |
 | ILY on your **cursor** hand | ~1.2s | **pause / resume** everything (chime says which way) |
 
 Either hand fires the mic, the paste and the frame shot. **ILY is the one
@@ -87,6 +87,13 @@ While you hold the frame pose, the framed region is highlighted on the actual
 screen, Cmd+Shift+4-style — amber while the dwell fills, green when releasing
 will fire. The highlight window is excluded from screen capture, so it never
 appears in its own shot (`--no-screen-overlay` disables it).
+
+**Which screen.** The frame is normalized to one display: the one the **cursor**
+is on when the pose begins. Highlight, shutter and window placement all resolve
+through the same answer (`actions.active_display`), so they cannot disagree.
+Before that they were all computed against the main display's size with an
+implied `(0,0)` origin, which meant a two-screen desk framed one screen and
+captured another.
 
 ## The free hand
 

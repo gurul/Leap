@@ -743,8 +743,14 @@ class CameraSource:
                  min_tracking_confidence: float = 0.5,
                  screen_aspect: Optional[float] = None):
         if screen_aspect is None:
-            from .actions import main_screen_size
-            sw, sh = main_screen_size()
+            # The display the cursor is on at startup, not necessarily the main
+            # one: the dynamic box is shaped like the screen it maps onto, and
+            # touch mode maps onto that display. Switching screens mid-session
+            # moves the map but not this shape — a 16:9 external read through a
+            # box fitted for the 1.54:1 panel stretches slightly. Refit (reach
+            # map) if that matters.
+            from .actions import active_screen_size
+            sw, sh = active_screen_size()
             screen_aspect = sw / sh
         self._screen_aspect = screen_aspect
         self._camera = camera

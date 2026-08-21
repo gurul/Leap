@@ -28,6 +28,10 @@ paste and the frame shot; ILY is the one pose whose meaning depends on which
 hand makes it, which is what buys a pause without spending a second pose on
 it. While you are composing a frame shot, nothing else can fire.
 
+The frame lands on **the display your cursor is on**, not the main one — the
+highlight and the shutter both follow it, so on a two-screen desk you frame
+the screen you are looking at.
+
 ## Quick start
 
 ```bash

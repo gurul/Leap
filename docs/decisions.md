@@ -14,6 +14,47 @@ would make us reverse it.
 
 ---
 
+## 2026-08-21 — the cursor picks the screen
+
+**What.** Every screen-shaped decision now resolves against the display the
+**cursor** is on, not the main display: the frame shot, the frame highlight
+window, `--pane window` placement, the grab shot, the legacy touch map, and the
+reach tool's live viewport. One function answers it — `actions.active_display()`
+— so those paths cannot disagree about which screen they mean.
+
+**Why.** *"the screenshot should take a screenshot / control whatever screen
+the cursor is on / focused"*. On a two-display desk the frame shot was
+unusable on the second screen: you framed the panel you were looking at and the
+shutter fired at the same *proportional* region of the main display.
+
+**Evidence.** The rect math took `backend.screen` — the main display's size —
+and multiplied normalized coordinates by it, with an implied `(0, 0)` origin.
+On this desk the second display starts at CG `(−1512, 0)`, so no frame gesture
+could ever address a negative coordinate. Verified the fix's premise on the
+metal first: `screencapture -R-1400,100,300,300` returns a 600×600 file, i.e.
+the Retina panel at 2× — the region really came off the second display.
+Regression tests pin both halves (`test_frame_region_carries_the_second_display_origin`,
+`test_the_frame_shot_follows_the_cursor_to_the_other_display`), and the touch
+map's follow is pinned with its never-mid-hold guard.
+
+**How the touch map switches** (legacy only). Touch mode owns the cursor while
+a hand is tracked, so the cursor only lands on another display because the user
+put it there. That is the switch: move the pointer to the screen you want and
+the hand sheet maps onto it, polled at 4 Hz, never while a button is held.
+
+**Restore.** The old behaviour is `frame_region_px(rect, (0, 0, *backend.screen))`
+and `self._active = display_rect_at(self.rects, *backend.pos())` frozen at init.
+
+**Reverse it if.** A user wants the frame shot to always target one fixed
+screen (a presentation display, say). That is a flag, not a default — and the
+default should stay "the screen you are looking at".
+
+**Known limit.** Display geometry is still cached at init (SI-3), and the
+dynamic reach box's *shape* is still fixed at startup from the display the
+cursor was on then.
+
+---
+
 ## 2026-08-20 — the hand stopped driving the cursor
 
 **What.** The shipped tool became five gestures: mic (thumbs-up), Enter (ILY

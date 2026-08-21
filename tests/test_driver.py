@@ -548,6 +548,53 @@ def test_absolute_cursor_snaps_to_live_target_after_the_click():
     assert (driver.x, driver.y) != aim, "offset survived the click"
 
 
+def _two_display_touch_driver():
+    """Main 1920x1080 at the origin, laptop panel 1512x982 to its LEFT."""
+    from leapinput.actions import DryRunBackend
+
+    backend = DryRunBackend(screen=(1920.0, 1080.0),
+                            bounds=(-1512.0, 0.0, 1920.0, 1080.0),
+                            rects=[(0.0, 0.0, 1920.0, 1080.0),
+                                   (-1512.0, 0.0, 0.0, 982.0)])
+    backend.move(960.0, 540.0)                      # cursor on the main display
+    driver = DirectDriver(backend, Mapping(plane="xy", absolute=True,
+                                           pointer_min_cutoff=1000.0))
+    return driver, backend
+
+
+def test_touch_map_targets_the_display_the_cursor_is_on():
+    """Touch mode maps the hand onto ONE screen, and the cursor picks which:
+    park it on the second display and the SAME hand position now addresses
+    that display instead of the main one."""
+    driver, backend = _two_display_touch_driver()
+    driver.on_intent(IntentEvent(Intent.CLUTCH_DOWN, 0.0, abs_frame(0, 260, 0)))
+    driver.on_intent(IntentEvent(Intent.POINT_MOVE, 0.01,
+                                 abs_frame(0, 260, 10_000), {"settle": 1.0}))
+    assert driver.x >= 0.0, "hand started mapped to the main display"
+
+    backend.move(-700.0, 500.0)                     # user drags it to the laptop
+    driver.on_intent(IntentEvent(Intent.POINT_MOVE, 0.4,
+                                 abs_frame(0, 260, 400_000), {"settle": 1.0}))
+    assert driver._active == (-1512.0, 0.0, 0.0, 982.0)
+    assert driver.x < 0.0, "same hand position still aiming at the main display"
+    assert backend.calls[-1][0] == "move" and backend.calls[-1][1] < 0
+
+
+def test_the_touch_map_never_switches_display_mid_hold():
+    """Re-basing the map during a drag would teleport it. The cursor crossing
+    displays while the button is down is the DRAG doing that, not a request to
+    move the map."""
+    driver, backend = _two_display_touch_driver()
+    driver.on_intent(IntentEvent(Intent.CLUTCH_DOWN, 0.0, abs_frame(0, 260, 0)))
+    driver.on_intent(IntentEvent(Intent.POINT_MOVE, 0.01,
+                                 abs_frame(0, 260, 10_000), {"settle": 1.0}))
+    driver.on_intent(IntentEvent(Intent.GRAB_DOWN, 0.02, abs_frame(0, 260, 20_000)))
+    backend.move(-700.0, 500.0)
+    driver.on_intent(IntentEvent(Intent.POINT_MOVE, 0.4,
+                                 abs_frame(0, 260, 400_000), {"settle": 1.0}))
+    assert driver._active == (0.0, 0.0, 1920.0, 1080.0)
+
+
 def test_a_drag_release_stays_where_it_was_dragged():
     driver, backend = make()
     driver.on_intent(IntentEvent(Intent.CLUTCH_DOWN, 0.0, frame(0, 150, 0, 0)))
@@ -621,15 +668,53 @@ def test_click_state_builds_doubles_and_resets():
 def test_frame_region_maps_to_screen_pixels():
     from leapinput.driver import frame_region_px
 
-    region = frame_region_px((0.25, 0.25, 0.75, 0.75), (1512.0, 982.0), 0.05)
+    region = frame_region_px((0.25, 0.25, 0.75, 0.75),
+                             (0.0, 0.0, 1512.0, 982.0), 0.05)
     assert region == (378, 245, 756, 491)
+
+
+def test_frame_region_carries_the_second_display_origin():
+    """A display left of the main one has a NEGATIVE origin, and the region
+    must land there — not at the same offset on the main screen."""
+    from leapinput.driver import frame_region_px
+
+    region = frame_region_px((0.25, 0.25, 0.75, 0.75),
+                             (-1512.0, 0.0, 0.0, 982.0), 0.05)
+    assert region == (-1134, 245, 756, 491)
 
 
 def test_a_sloppy_tiny_frame_is_rejected():
     from leapinput.driver import frame_region_px
 
-    assert frame_region_px((0.5, 0.2, 0.52, 0.8), (1512.0, 982.0), 0.05) is None
-    assert frame_region_px(None, (1512.0, 982.0), 0.05) is None
+    screen = (0.0, 0.0, 1512.0, 982.0)
+    assert frame_region_px((0.5, 0.2, 0.52, 0.8), screen, 0.05) is None
+    assert frame_region_px(None, screen, 0.05) is None
+
+
+def test_the_frame_shot_follows_the_cursor_to_the_other_display():
+    """The whole point: frame a region while working on the second display and
+    the shutter fires THERE, not at the same coordinates on the main screen."""
+    from leapinput import driver as drv
+    from leapinput.actions import DryRunBackend
+    from leapinput.commands import Command, CommandEvent
+
+    backend = DryRunBackend(
+        screen=(1920.0, 1080.0),
+        bounds=(-1512.0, 0.0, 1920.0, 1080.0),
+        rects=[(0.0, 0.0, 1920.0, 1080.0),          # main
+               (-1512.0, 0.0, 0.0, 982.0)])         # laptop panel, to its left
+    backend.move(-700.0, 500.0)                     # cursor on the laptop
+
+    captured = []
+    original = drv._screenshot_region
+    drv._screenshot_region = lambda *a: captured.append(a)
+    try:
+        sd = drv.ShortcutDriver(backend)
+        sd.on_command(CommandEvent(Command.NEW_PANE, 0.0,
+                                   {"rect": (0.25, 0.25, 0.75, 0.75)}))
+    finally:
+        drv._screenshot_region = original
+    assert captured == [(-1134, 245, 756, 491)]
 
 
 def test_screenshot_pane_presses_no_keys():

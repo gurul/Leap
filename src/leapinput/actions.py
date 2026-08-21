@@ -29,6 +29,81 @@ def main_screen_size() -> tuple[float, float]:
         return (1512.0, 982.0)
 
 
+def display_rect_at(rects, x: float, y: float) -> tuple[float, float, float, float]:
+    """The display rect (CG global) that holds the point — nearest one when the
+    point falls in a VOID, which an L-shaped layout's union rectangle has."""
+    best, best_d = None, None
+    for r in rects:
+        x0, y0, x1, y1 = r
+        cx = max(x0, min(x1 - 1.0, x))
+        cy = max(y0, min(y1 - 1.0, y))
+        d = (cx - x) ** 2 + (cy - y) ** 2
+        if best_d is None or d < best_d:
+            best, best_d = r, d
+            if d == 0.0:
+                break
+    return best
+
+
+def display_rects() -> list[tuple[float, float, float, float]]:
+    """Every active display as (x0, y0, x1, y1) in CG global coordinates —
+    origin at the MAIN display's top-left, y down, so displays above or left of
+    it have negative origins. Quartz-direct (no Accessibility permission
+    needed), so tools like `reach map` can use it too."""
+    try:
+        from Quartz.CoreGraphics import (
+            CGGetActiveDisplayList, CGDisplayBounds, CGMainDisplayID,
+        )
+        err, ids, count = CGGetActiveDisplayList(16, None, None)
+        rects = ([CGDisplayBounds(d) for d in ids[:count]] if not err
+                 else [CGDisplayBounds(CGMainDisplayID())])
+        return [(float(r.origin.x), float(r.origin.y),
+                 float(r.origin.x + r.size.width),
+                 float(r.origin.y + r.size.height)) for r in rects]
+    except Exception:
+        w, h = main_screen_size()
+        return [(0.0, 0.0, w, h)]
+
+
+def cursor_point() -> tuple[float, float]:
+    """Where the cursor is right now, in CG global coordinates."""
+    try:
+        from Quartz.CoreGraphics import CGEventCreate, CGEventGetLocation
+        p = CGEventGetLocation(CGEventCreate(None))
+        return (float(p.x), float(p.y))
+    except Exception:
+        return (0.0, 0.0)
+
+
+def active_display(backend=None) -> tuple[float, float, float, float]:
+    """The display the CURSOR is on — the screen the user is actually working
+    on, which is only sometimes the main one.
+
+    Everything screen-shaped resolves through here: the frame shot, the window
+    placement, the touch map. Before this, all three were computed against the
+    main display's size with an implied (0,0) origin, so on a two-display
+    session every frame gesture acted on the main screen no matter which one
+    you were looking at.
+
+    Pass a backend to read its cached rects and live cursor (the driver path,
+    which keeps DryRun sessions honest); omit it to ask Quartz directly.
+    """
+    if backend is None:
+        return display_rect_at(display_rects(), *cursor_point())
+    try:
+        return display_rect_at(backend.rects, *backend.pos())
+    except Exception:
+        w, h = backend.screen
+        return (0.0, 0.0, w, h)
+
+
+def active_screen_size() -> tuple[float, float]:
+    """Logical pixels of the display the cursor is on. Same fallback as
+    `main_screen_size` where Quartz is unavailable."""
+    x0, y0, x1, y1 = active_display()
+    return (x1 - x0, y1 - y0)
+
+
 class Backend(Protocol):
     def move(self, x: float, y: float) -> None: ...
     @property
@@ -64,9 +139,13 @@ class DryRunBackend:
 
     def __init__(self, screen: tuple[float, float] = (1512.0, 982.0),
                  bounds: tuple[float, float, float, float] | None = None,
-                 verbose: bool = False):
+                 verbose: bool = False,
+                 rects: list[tuple[float, float, float, float]] | None = None):
         self._screen = screen
         self._bounds = bounds or (0.0, 0.0, screen[0], screen[1])
+        # A multi-display layout, dry-run: without this every dry session is
+        # single-screen, and the display-following paths go untested.
+        self._rects = list(rects) if rects else [self._bounds]
         self._pos = (screen[0] / 2.0, screen[1] / 2.0)
         self.verbose = verbose
         self.calls: list[tuple] = []
@@ -81,7 +160,7 @@ class DryRunBackend:
 
     @property
     def rects(self) -> list[tuple[float, float, float, float]]:
-        return [self._bounds]
+        return list(self._rects)
 
     def pos(self) -> tuple[float, float]:
         """Where the cursor 'is': the last point moved to, seeded at center."""

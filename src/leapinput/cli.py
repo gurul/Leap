@@ -213,7 +213,8 @@ def main(argv=None) -> int:
                     default="screenshot",
                     help="what the finger-frame gesture does: screenshot the "
                          "framed region to the clipboard (default), spawn a "
-                         "new window placed over it, or open a tab")
+                         "new window placed over it, or open a tab. The frame "
+                         "always lands on the display the cursor is on")
     ap.add_argument("--verbose", action="store_true", help="log pointer moves too")
     ap.add_argument("--invert-x", action=argparse.BooleanOptionalAction,
                     default=None,

@@ -27,8 +27,11 @@ Protocol (one JSON object per line on the helper's stdin):
     {"rect": [x0, y0, x1, y1], "progress": 0.4, "done": false}   show/update
     {"rect": null}                                               hide
     EOF                                                          quit
-Rect is normalized 0..1, y down from the top-left of the main screen — the
-same convention as CommandEngine's overlay dict.
+Rect is normalized 0..1, y down from the top-left of the ACTIVE screen — the
+display the cursor is on, which is the one the frame shot captures. The window
+follows the cursor between displays for exactly that reason: pinned to the main
+screen, it drew the viewfinder on one display while the shutter fired on
+another. Same normalized convention as CommandEngine's overlay dict.
 """
 
 from __future__ import annotations
@@ -109,6 +112,22 @@ def _helper_main() -> None:
 
     screen = AppKit.NSScreen.mainScreen().frame()
 
+    def cursor_screen_frame():
+        """The AppKit frame of the display holding the cursor.
+
+        NSEvent.mouseLocation and NSScreen.frame share one coordinate space
+        (bottom-left origin, y up) — unlike CGDisplayBounds, which the rest of
+        the codebase uses. Mixing the two puts the window on the wrong display,
+        so this side stays entirely in AppKit's space.
+        """
+        loc = AppKit.NSEvent.mouseLocation()
+        for s in AppKit.NSScreen.screens():
+            f = s.frame()
+            if (f.origin.x <= loc.x < f.origin.x + f.size.width
+                    and f.origin.y <= loc.y < f.origin.y + f.size.height):
+                return f
+        return AppKit.NSScreen.mainScreen().frame()
+
     class FrameView(AppKit.NSView):
         state = None            # dict from the wire, or None
 
@@ -117,7 +136,10 @@ def _helper_main() -> None:
             if not st or st.get("rect") is None:
                 return
             x0, y0, x1, y1 = st["rect"]
-            w, h = screen.size.width, screen.size.height
+            # The view's own size, not the main screen's: the window moves
+            # between displays, and those displays are different sizes.
+            b = self.bounds()
+            w, h = b.size.width, b.size.height
             # Normalized y-down -> AppKit y-up.
             r = AppKit.NSMakeRect(x0 * w, h - y1 * h,
                                   (x1 - x0) * w, (y1 - y0) * h)
@@ -160,6 +182,19 @@ def _helper_main() -> None:
     window.orderFrontRegardless()
 
     def apply(state) -> None:
+        # Re-home the window on show, never mid-frame: the rectangle must land
+        # on the screen the shot will capture, and moving it while a frame is
+        # being held would drag the viewfinder out from under the hands.
+        showing = bool(state) and state.get("rect") is not None
+        was_showing = bool(view.state) and view.state.get("rect") is not None
+        if showing and not was_showing:
+            f = cursor_screen_frame()
+            cur = window.frame()
+            if (f.origin.x, f.origin.y, f.size.width, f.size.height) != (
+                    cur.origin.x, cur.origin.y, cur.size.width, cur.size.height):
+                window.setFrame_display_(f, False)
+                view.setFrame_(AppKit.NSMakeRect(
+                    0.0, 0.0, f.size.width, f.size.height))
         view.state = state
         view.setNeedsDisplay_(True)
 

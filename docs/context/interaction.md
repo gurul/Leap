@@ -338,9 +338,11 @@ amplifier, quantified by the audit swarm:
 
 Two real-world dimensions entered the loop:
 
-- **The display**: the dynamic box is shaped by the ACTUAL main display
+- **The display**: the dynamic box is shaped by the ACTUAL display
   (Quartz-queried; this machine: 1512x982 — the 14.2-inch MacBook Pro panel,
   ~1.54:1), not a 16:10 guess. Side effect: less y-axis noise excess.
+  *Amended 2026-08-21: "the main display" here became "the display the cursor
+  is on at startup" — see [learnings/screen-mapping.md](../learnings/screen-mapping.md).*
 - **The hand**: `reach hand` calibrates the user's REAL knuckle span — the
   ChArUco-board idea with the hand as the board: a rigid, known-size object
   in every frame that converts image measurements to metric. Ruler entry
