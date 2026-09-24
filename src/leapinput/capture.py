@@ -20,7 +20,7 @@ from typing import Callable, Optional
 # all (e.g. a camera-only setup driving leapinput.camera.CameraSource).
 try:
     import leap
-except ImportError:          # no SDK — LeapSource/server_status raise if used
+except Exception:            # no SDK (the vendored package raises a bare Exception) — LeapSource/server_status raise if used
     leap = None
 
 

@@ -92,14 +92,14 @@ class LeapMenuBar(rumps.App):
             "running": f"Hand control: ON{where}",
             "paused": f"Hand control: paused{where} (hold ILY to resume)",
             "off": "Hand control: off"}[state]
-        self.toggle_item.title = ("Turn on (built-in camera)" if state == "off"
+        self.toggle_item.title = ("Turn on (webcam)" if state == "off"
                                   else "Turn off")
         self.phone_item.title = ("Phone camera (legacy) — streaming" if on_phone
                                  else "Phone camera (legacy) — how to")
 
     def toggle(self, _) -> None:
         if self.state() == "off":
-            # Default source (built-in camera): on and tracking with zero
+            # Default source (webcam: OBSBOT, else built-in): on and tracking with zero
             # ceremony, and no server listening on the LAN. The phone/WebRTC
             # path only ever starts from its own menu item.
             ctl("on")

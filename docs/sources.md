@@ -29,7 +29,14 @@ Cameras are picked **by name**, not by index — virtual cameras (Camo, OBS)
 shuffle AVFoundation's device order, and their feeds are black unless their
 app is streaming. `--list-cameras` shows what's attached; `--camera-name
 iphone` targets Continuity Camera (or any camera by substring), `--camera N`
-forces a raw index.
+forces a raw index. With no flag, an attached OBSBOT wins, then the
+built-in camera.
+
+The OBSBOT Tiny 3 opens under OpenCV and then delivers no frames in any mode,
+so `leapinput.ffmpegcam` reads it through ffmpeg (`brew install ffmpeg`) at
+1280x720 @ 120 fps instead. Measured 2026-09-24 with detection running:
+95–106 fps, ~10 ms detection per frame. Detection, not the camera, is now the
+ceiling. The camera sits on a USB 2 link (480 Mb/s) on this Mac.
 
 ## The phone as a 60 fps camera — no app required
 
@@ -54,7 +61,7 @@ without a terminal: it stops a webcam session if one is running, starts the
 phone source, then copies the URL to the clipboard and shows it. The LAN IP
 in that URL changes with the network, so the menu reads it from the log the
 running session just wrote rather than reusing an old one. The plain
-**Turn on** never starts the server — the built-in camera is the default,
+**Turn on** never starts the server — the webcam (OBSBOT if attached, else built-in) is the default,
 and the phone path is always an explicit choice.
 
 Measured on 2026-08-18 (iPhone → M5 MacBook Pro, LAN Wi-Fi): **57.2 fps

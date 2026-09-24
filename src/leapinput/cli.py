@@ -186,7 +186,8 @@ def main(argv=None) -> int:
                          "over WebRTC (open the printed URL in Safari)")
     ap.add_argument("--camera", type=int, default=None,
                     help="camera index for --source camera (default: auto — "
-                         "the built-in camera, skipping virtual cameras like "
+                         "an OBSBOT if attached, else the built-in camera, "
+                         "skipping virtual cameras like "
                          "Camo or OBS)")
     ap.add_argument("--camera-name", default=None, metavar="NAME",
                     help="pick the camera by name substring instead of index, "

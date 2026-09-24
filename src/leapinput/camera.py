@@ -680,6 +680,11 @@ def set_thread_qos_user_interactive() -> None:
         pass
 
 
+# Physical external webcams that beat the built-in camera when attached.
+PREFERRED_CAMERAS = ("obsbot",)
+BUILTIN_CAMERAS = ("macbook", "facetime", "built-in")
+
+
 def camera_names() -> list[str]:
     """Attached camera names, in AVFoundation enumeration order.
 
@@ -699,16 +704,19 @@ def camera_names() -> list[str]:
 
 
 def pick_camera_index() -> int:
-    """AVFoundation index of the built-in camera.
+    """AVFoundation index of the camera to use when none is named.
 
+    Preference order: an attached OBSBOT webcam, then the built-in camera.
     Virtual cameras (Camo, OBS, ...) register ahead of the built-in one, so
     index 0 stops meaning "the webcam" the day one of those apps is installed —
     opening it yields a black feed unless that app is actively streaming.
-    Falls back to 0 when no built-in camera is recognized.
+    Falls back to 0 when neither is recognized.
     """
-    for i, name in enumerate(camera_names()):
-        if any(k in name.lower() for k in ("macbook", "facetime", "built-in")):
-            return i
+    names = [n.lower() for n in camera_names()]
+    for keys in (PREFERRED_CAMERAS, BUILTIN_CAMERAS):
+        for i, name in enumerate(names):
+            if any(k in name for k in keys):
+                return i
     return 0
 
 
@@ -950,6 +958,19 @@ class CameraSource:
         phonecam.PhoneSource feeds WebRTC frames through the same loop.
         """
         index = self._camera if self._camera is not None else pick_camera_index()
+        # Some cameras open under OpenCV and then never deliver a frame
+        # (OBSBOT Tiny 3, 2026-09-24). Those go through ffmpeg instead.
+        from .ffmpegcam import FFmpegCapture, ffmpeg_path, wants_ffmpeg
+        names = camera_names()
+        name = names[index] if index < len(names) else ""
+        if wants_ffmpeg(name):
+            if ffmpeg_path() is not None:
+                print(f"camera {index} ({name}): reading through ffmpeg, "
+                      "1280x720 @ 120fps", file=sys.stderr)
+                return FFmpegCapture(name)
+            print(f"camera {index} ({name}) needs ffmpeg, which is not "
+                  "installed — OpenCV will likely get no frames",
+                  file=sys.stderr)
         cap = cv2.VideoCapture(index)
         if not cap.isOpened():
             raise RuntimeError(

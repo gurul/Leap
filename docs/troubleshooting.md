@@ -146,3 +146,17 @@ would use to fix it.
   macOS — `CGEventPost` returns no error and simply does nothing — so it
   gates on `AXIsProcessTrusted()`, triggers the system grant prompt, and
   refuses to start rather than run with a dead cursor.
+
+## A camera opens but never delivers a frame (OBSBOT)
+
+`cv2.VideoCapture` opens the OBSBOT Tiny 3 and `read()` then fails forever, in
+every resolution and frame rate. ffmpeg's avfoundation input reads the same
+device fine, so any camera named in `ffmpegcam.FFMPEG_CAMERAS` goes through
+ffmpeg. If the log says the camera "needs ffmpeg", install it with
+`brew install ffmpeg`. To test the device by hand:
+
+```bash
+ffmpeg -f avfoundation -framerate 120 -video_size 1280x720 \
+  -i "OBSBOT Tiny 3 StreamCamera:none" -t 4 -f null -
+```
+

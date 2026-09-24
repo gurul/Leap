@@ -284,7 +284,7 @@ def main(argv=None) -> int:
                           "geometry the sessions use — thresholds fitted at "
                           "one viewpoint do not survive another")
     cap.add_argument("--camera", type=int, default=None,
-                     help="camera index (default: auto — the built-in camera)")
+                     help="camera index (default: auto — OBSBOT if attached, else built-in)")
     cap.add_argument("--camera-name", default=None, metavar="NAME")
     cap.add_argument("--no-analyze", action="store_true",
                      help="record only; fit later with `analyze`")
