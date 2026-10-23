@@ -61,8 +61,7 @@ background thread, reads the pasteboard back, screenshots the framed region and
 files a JSON record. The agent-side queue is `leapinput-grab list|next|done`.
 
 What it *lost* is the free-hand COPY pose, so the "point at a component with a
-pinch" half of the loop is gone; framing still works. Test bed: `mock-ui/`
-(Vite + React with React Grab installed). Untrusted-content rules:
+pinch" half of the loop is gone; framing still works. Untrusted-content rules:
 [safety-and-failure-modes.md](safety-and-failure-modes.md#untrusted-content-grab-modes-rule).
 
 **The two-hand framing rect fix** (`index_tip_frame`) is live and load-bearing,

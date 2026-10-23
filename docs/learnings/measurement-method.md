@@ -25,9 +25,8 @@ The same predicate drives the live panel and the validation, so what you watch
 is what is enforced. The fitter also flags sparse capture (<60% of the expected
 ~100 fps) and exits 2 with "thresholds from this session would be wrong."
 
-The bad session is kept in the tree as
-`docs/context/session-INVALID-2026-08-12.jsonl` — it is the evidence for the
-`stabilized_position` defect and a regression fixture. (6d0d9dd, e890fe8,
+The bad session was the evidence for the `stabilized_position` defect; it was
+removed from the tree and lives in git history. (6d0d9dd, e890fe8,
 `record.py:33-222`)
 
 **Any future recalibration protocol should be pose-gated and self-validating.**
@@ -79,7 +78,6 @@ recorded session replays to exactly the same intents at any speed.
 | Corpus | What |
 |---|---|
 | `docs/context/session.jsonl` | 3,639 frames, 2026-08-12, one user, one v1 controller — the provenance of almost every Leap threshold. Cited by name in `driver.py:30`, `gestures.py:166`, `tests/test_replay.py:19` |
-| `docs/context/session-INVALID-2026-08-12.jsonl` | 3,050 frames from the countdown protocol. Kept deliberately as evidence and fixture |
 | `camera_session.jsonl` | the camera-path capture the fitter reads (gitignored, machine-local) |
 | `~/.leapinput/telemetry/clicks-<date>.jsonl` | every button commit with 2 s before and 0.5 s after |
 

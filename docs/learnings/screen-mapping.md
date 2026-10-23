@@ -415,8 +415,8 @@ so mouse-down posts on a stopped cursor instead of at ~71% gain. (38091ac,
 quantity.** The stored tuning had been fitted on the phone camera
 (`ref_span_img` 0.058) against a live built-in-webcam span of 0.072–0.134, so
 everything scaled by span was off by roughly **2×**. The current
-`camera_tuning.json` carries `ref_span_img` 0.0955; the phone fit is preserved
-as `camera_tuning.phone-2026-08-18.bak`. Pose thresholds carried over
+`camera_tuning.json` carries `ref_span_img` 0.0955; the phone fit is in git
+history (`camera_tuning.phone-2026-08-18.bak`). Pose thresholds carried over
 unchanged. Changing camera or camera *position* invalidates the reach box and
 the working distance; `calibrate capture` (~3 min) + `reach corners` (10 s)
 rebuild it entirely. (85b7564)

@@ -91,7 +91,6 @@ Every number in the docs traces back to one of these.
 | What | Where |
 |---|---|
 | The 3,639-frame Leap corpus behind almost every threshold | `docs/context/session.jsonl` (committed; replayed by `tests/test_replay.py`) |
-| The invalid first capture, kept as evidence for two defects | `docs/context/session-INVALID-2026-08-12.jsonl` |
 | The camera-path capture the calibration fitter reads | `camera_session.jsonl` (gitignored, machine-local) |
 | Every button commit, with 2 s before and 0.5 s after | `~/.leapinput/telemetry/clicks-<date>.jsonl` |
 | Your fitted thresholds and reach box | `camera_tuning.json` (gitignored) |
