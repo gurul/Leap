@@ -711,12 +711,26 @@ def pick_camera_index() -> int:
     index 0 stops meaning "the webcam" the day one of those apps is installed —
     opening it yields a black feed unless that app is actively streaming.
     Falls back to 0 when neither is recognized.
+
+    A camera that only ffmpeg can read (the OBSBOT) is skipped when ffmpeg is
+    not installed (2026-11-15): OpenCV opens it and gets no frames, and the
+    session then blamed the Camera permission. The built-in camera works.
     """
+    from .ffmpegcam import ffmpeg_path, wants_ffmpeg
+    have_ffmpeg = ffmpeg_path() is not None
     names = [n.lower() for n in camera_names()]
     for keys in (PREFERRED_CAMERAS, BUILTIN_CAMERAS):
         for i, name in enumerate(names):
             if any(k in name for k in keys):
+                if wants_ffmpeg(name) and not have_ffmpeg:
+                    print(f"camera {i} ({name}) needs ffmpeg, which is not "
+                          "installed — skipping it (brew install ffmpeg)",
+                          file=sys.stderr)
+                    continue
                 return i
+    if not have_ffmpeg:
+        # The unrecognized fallback must not land on the skipped camera.
+        return next((i for i, n in enumerate(names) if not wants_ffmpeg(n)), 0)
     return 0
 
 

@@ -1,0 +1,27 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    # macOS: the base dependencies are pyobjc, which only installs here.
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
+      - name: Install
+        run: |
+          uv venv --python 3.12 .venv
+          VIRTUAL_ENV="$PWD/.venv" uv pip install -e '.[dev]'
+      - name: Test
+        # The sink makes the guard write the releases it would post to a
+        # file instead of posting them, so CI checks the release ran.
+        env:
+          LEAPINPUT_GUARD_SINK: ${{ runner.temp }}/leap-guard-sink.txt
+        run: .venv/bin/python -m pytest -q

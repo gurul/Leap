@@ -16,7 +16,10 @@ leapinput-menubar = "leapinput.menubar:main"
 leapinput-grab = "leapinput.grab:main"
 
 [project.optional-dependencies]
-dev = ["pytest"]
+# What the test suite imports with no camera and no Leap: numpy for the ffmpeg
+# capture, aiortc + aiohttp for the phone source's receiver and offer handler
+# (2026-11-15; with pytest alone a fresh clone stopped at collection).
+dev = ["pytest", "numpy", "aiortc", "aiohttp"]
 # --source camera: webcam hand tracking, no Leap hardware or SDK required.
 # mediapipe 1.x ships only the Tasks API; the model file is fetched separately
 # (see leapinput/camera.py MODEL_URL — scripts/setup.sh does it for you).

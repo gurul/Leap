@@ -107,6 +107,37 @@ class _StallWatch:
         return False, False
 
 
+def run_dir() -> Path:
+    """Where the session's shared state lives. LEAPINPUT_RUN_DIR overrides it,
+    which is how tests stay out of the real ~/.leapinput."""
+    return Path(os.environ.get("LEAPINPUT_RUN_DIR",
+                               Path.home() / ".leapinput"))
+
+
+def take_session_lock(path: Path):
+    """One live quartz session at a time (2026-11-15). Two sessions fire every
+    gesture twice — Enter sent twice, paste run twice — and `leapctl pause`
+    reaches only one of them.
+
+    An advisory flock, not a PID file: the kernel drops it on ANY exit,
+    SIGKILL included, so a crash can never leave a stale lock behind. Returns
+    the open file (keep it referenced for the session's life), or None when
+    another live session holds it."""
+    import fcntl
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fh = open(path, "a+")
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        fh.close()
+        return None
+    fh.seek(0)
+    fh.truncate()
+    fh.write(f"{os.getpid()}\n")
+    fh.flush()
+    return fh
+
+
 def apply_projection_flags(tuning, args):
     """Stored tuning + the flags that change the hand->screen PROJECTION.
 
@@ -358,6 +389,19 @@ def main(argv=None) -> int:
               "    leapinput --legacy --source phone", file=sys.stderr)
         return 2
 
+    # Before anything opens a camera or posts an event. A dry-run session
+    # takes no lock: it posts nothing, so two of them cannot double a gesture.
+    session_lock = None
+    if args.backend == "quartz":
+        lock_path = Path(os.environ.get("LEAPINPUT_LOCK_FILE",
+                                        run_dir() / "session.lock"))
+        session_lock = take_session_lock(lock_path)
+        if session_lock is None:
+            print(f"another leapinput session is already driving this Mac "
+                  f"(lock: {lock_path}).\n"
+                  "  Stop it first: scripts/leapctl off", file=sys.stderr)
+            return 2
+
     tuning = None
     if args.source != "leap":
         import dataclasses
@@ -373,6 +417,7 @@ def main(argv=None) -> int:
                   "with: python -m leapinput.reach map", file=sys.stderr)
 
     commands_on = args.source != "leap" and not args.no_commands
+    needs_ffmpeg = False
     if args.source == "camera":
         if args.camera_name is not None:
             try:
@@ -389,6 +434,8 @@ def main(argv=None) -> int:
                               tuning=tuning)
         print(f"MediaPipe HandLandmarker — camera {args.camera} "
               f"({label}, mirrored)")
+        from .ffmpegcam import ffmpeg_path, wants_ffmpeg
+        needs_ffmpeg = wants_ffmpeg(label) and ffmpeg_path() is None
     elif args.source == "phone":
         from .phonecam import PhoneSource
         source = PhoneSource(preview=args.preview, hand=args.hand,
@@ -486,16 +533,14 @@ def main(argv=None) -> int:
 
         # `leapctl status` (and the menu bar icon) read pause state from a
         # flag file — a signal can ask "toggle" but not "which way is it now".
-        run_dir = Path(os.environ.get("LEAPINPUT_RUN_DIR",
-                                      Path.home() / ".leapinput"))
-        paused_flag = run_dir / "paused"
+        paused_flag = run_dir() / "paused"
 
         def _write_paused(enabled: bool) -> None:
             try:
                 if enabled:
                     paused_flag.unlink(missing_ok=True)
                 else:
-                    run_dir.mkdir(parents=True, exist_ok=True)
+                    paused_flag.parent.mkdir(parents=True, exist_ok=True)
                     paused_flag.touch()
             except OSError:
                 pass    # cosmetic state; never let it take down the session
@@ -524,8 +569,7 @@ def main(argv=None) -> int:
     telemetry = None
     if not args.no_telemetry:
         from .telemetry import Telemetry, TelemetryServer
-        tele_dir = Path(os.environ.get("LEAPINPUT_RUN_DIR",
-                                       Path.home() / ".leapinput"))
+        tele_dir = run_dir()
         telemetry = Telemetry(engine, command_engine, direct=direct,
                               source=source, hand=args.hand,
                               pinch_on_mm=gesture_cfg.pinch_on_mm,
@@ -644,14 +688,16 @@ def main(argv=None) -> int:
                   "grab": "file a change request (grab mode)"}[args.pane]
     if not args.legacy:
         print("\n  HANDS OFF THE CURSOR — your mouse still owns the pointer.")
-        print("  Five gestures. Hold each until the ring fills, then release")
-        print("  (the pause fires as the ring fills, without waiting for it):")
+        print("  Five gestures. Mic, Enter, paste and the pause fire as the "
+              "ring fills,")
+        print("  while you still hold the pose; the frame shot fires when you "
+              "release it:")
         print(f"    {'thumbs-up'.ljust(35)}= mic ON (chime); "
               "thumbs-up again = mic OFF")
         print(f"    {'ILY on your other hand'.ljust(35)}= Enter")
         print(f"    {'V sign (peace)'.ljust(35)}= Cmd+V (paste)")
         print(f"    {'frame a rectangle with both hands'.ljust(35)}= {pane_label}")
-        print(f"    {('ILY on your ' + args.hand.lower() + ' hand ~1.5s').ljust(35)}"
+        print(f"    {('ILY on your ' + args.hand.lower() + ' hand ~1.2s').ljust(35)}"
               f"= pause / resume (chime)")
         print("  Either hand fires the mic, paste and the frame shot; ILY is "
               "the one\n  pose that differs by hand — "
@@ -680,13 +726,14 @@ def main(argv=None) -> int:
                   "open hand = lift")
         if commands_on:
             free = "left" if args.hand == "Right" else "right"
-            print("  commands (hold the pose until the ring fills, then release):")
+            print("  commands (paste, Enter, mic and the pause fire as the ring "
+                  "fills;\n  the frame shot, Mission Control and copy fire on "
+                  "release):")
             print(f"  {args.hand.lower()} (cursor) hand:")
             print(f"    {'frame a rectangle with both hands'.ljust(35)}= {pane_label}")
             print("    OK sign (pinch, 3 fingers up)      = Mission Control")
-            print("    ILY sign (thumb+index+pinky) 1.5s  = pause / resume"
-                  " (fires as the ring fills)")
-            print("    thumbs-up ~0.6s                    = mic ON (chime); "
+            print("    ILY sign (thumb+index+pinky) 1.2s  = pause / resume")
+            print("    thumbs-up ~0.4s                    = mic ON (chime); "
                   "thumbs-up again = mic OFF")
             print(f"  {free} (free) hand:")
             print("    pinch and hold = Cmd+C    V sign = Cmd+V    "
@@ -703,6 +750,10 @@ def main(argv=None) -> int:
     # process dies in any way — including SIGKILL, which no finally: survives — the
     # pipe closes and the guard releases every mouse button.
     guard = Guard().start() if args.backend == "quartz" else None
+    if guard is not None and shortcuts is not None:
+        # Option is the one input the shipped tool holds. Tell the guard each
+        # edge, so a SIGKILL mid-dictation still ends with Option up.
+        shortcuts.on_option = guard.option
 
     def warn_if_stuck() -> None:
         seen = source.latest.get(args.hand)
@@ -730,110 +781,135 @@ def main(argv=None) -> int:
         import cv2
         win = "leapinput camera (q closes)"
         cv2.namedWindow(win, cv2.WINDOW_AUTOSIZE)
-    with source.open():
-        # The heavy object graphs (mediapipe, cv2, aiortc) are built; per-frame
-        # garbage dies by refcount, so cyclic GC only contributes surprise
-        # 10-50ms pauses mid-gesture. Freeze what exists, then make gen-0
-        # sweeps rare. (Not disabled outright: aiortc's asyncio does create
-        # reference cycles.)
-        import gc
-        gc.collect()
-        gc.freeze()
-        gc.set_threshold(50_000, 10, 10)
-        try:
-            warned_at = time.monotonic() + 4.0
-            lag_warned_at = time.monotonic() + 4.0
-            sig_assert_at = time.monotonic() + 2.0
-            # A denied Camera permission is not an error anywhere: cv2 logs one
-            # "not authorized to capture video" line and cap.read() then fails
-            # forever, so the session sits looking ON and tracking nothing. Say
-            # it once, in words, naming what has to be granted. Only for the
-            # webcam — the phone source is legitimately frameless until the
-            # device connects.
-            blind_at = (time.monotonic() + 5.0 if args.source == "camera"
-                        else None)
-            stall_watch = _StallWatch()
-            while deadline is None or time.monotonic() < deadline:
-                if cv2 is not None:
-                    frame_bgr = source.preview_frame
-                    if frame_bgr is not None:
-                        _overlay_status(cv2, frame_bgr, engine,
-                                        source.latest.get(args.hand),
-                                        last["intent"],
-                                        getattr(source, "stats", None),
-                                        command_engine)
-                        if command_engine is not None:
-                            _overlay_commands(cv2, frame_bgr,
-                                              command_engine.overlay)
-                            if not command_engine.enabled and tracker is None:
-                                cv2.putText(frame_bgr, "PAUSED (ILY pose 1.5s resumes)",
-                                            (8, 30), cv2.FONT_HERSHEY_SIMPLEX,
-                                            0.7, (0, 0, 230), 2, cv2.LINE_AA)
-                        if tracker is not None:
-                            from . import tutorial
-                            tutorial.draw(cv2, frame_bgr, tracker)
-                        cv2.imshow(win, frame_bgr)
-                    if cv2.waitKey(33) & 0xFF in (27, ord("q")):
-                        print("\npreview closed")
-                        break
-                else:
-                    time.sleep(0.2)
-                if time.monotonic() > sig_assert_at:
-                    # camera/mediapipe startup clobbers SIGUSR1 to SIG_IGN at
-                    # the C level (see the signal block above): take it back.
-                    assert_signal_handlers()
-                    sig_assert_at = time.monotonic() + 2.0
-                if time.monotonic() > warned_at:
-                    warn_if_stuck()
-                    warned_at = time.monotonic() + 8.0
-                stats = getattr(source, "stats", None)
-                if (stats and stats["fps"] and not stats["realtime"]
-                        and time.monotonic() > lag_warned_at):
-                    print(f"  tracking below realtime (detect "
-                          f"{stats['detect_ms']:.0f}ms > frame budget at "
-                          f"{stats['fps']:.0f}fps) — cursor will lag",
-                          file=sys.stderr)
-                    lag_warned_at = time.monotonic() + 5.0
-                release, stall_warn = stall_watch.update(source.frames,
-                                                         time.monotonic())
-                if release:
-                    # Idempotent: Schmitt.force_off emits nothing when nothing
-                    # is held, and the same call runs in the finally below.
-                    engine.on_snapshot(Snapshot())
-                    if stall_warn:
-                        print("  frame stream stalled — released held input",
+    # Shutdown order (2026-11-15). The capture thread delivers frames until
+    # source.open() exits, and a thumbs-up in that window used to re-press
+    # Option AFTER the exit release had run. So: refuse new presses first
+    # (shortcuts.close), stop the capture thread (leave the `with`), THEN run
+    # the final releases, and stop the guard last — it is the net under
+    # everything above it, so it must outlive every release.
+    try:
+        with source.open():
+            # The heavy object graphs (mediapipe, cv2, aiortc) are built; per-frame
+            # garbage dies by refcount, so cyclic GC only contributes surprise
+            # 10-50ms pauses mid-gesture. Freeze what exists, then make gen-0
+            # sweeps rare. (Not disabled outright: aiortc's asyncio does create
+            # reference cycles.)
+            import gc
+            gc.collect()
+            gc.freeze()
+            gc.set_threshold(50_000, 10, 10)
+            try:
+                warned_at = time.monotonic() + 4.0
+                lag_warned_at = time.monotonic() + 4.0
+                sig_assert_at = time.monotonic() + 2.0
+                # A denied Camera permission is not an error anywhere: cv2 logs one
+                # "not authorized to capture video" line and cap.read() then fails
+                # forever, so the session sits looking ON and tracking nothing. Say
+                # it once, in words, naming what has to be granted. Only for the
+                # webcam — the phone source is legitimately frameless until the
+                # device connects.
+                blind_at = (time.monotonic() + 5.0 if args.source == "camera"
+                            else None)
+                stall_watch = _StallWatch()
+                while deadline is None or time.monotonic() < deadline:
+                    if cv2 is not None:
+                        frame_bgr = source.preview_frame
+                        if frame_bgr is not None:
+                            _overlay_status(cv2, frame_bgr, engine,
+                                            source.latest.get(args.hand),
+                                            last["intent"],
+                                            getattr(source, "stats", None),
+                                            command_engine)
+                            if command_engine is not None:
+                                _overlay_commands(cv2, frame_bgr,
+                                                  command_engine.overlay)
+                                if not command_engine.enabled and tracker is None:
+                                    cv2.putText(frame_bgr, "PAUSED (ILY pose 1.2s resumes)",
+                                                (8, 30), cv2.FONT_HERSHEY_SIMPLEX,
+                                                0.7, (0, 0, 230), 2, cv2.LINE_AA)
+                            if tracker is not None:
+                                from . import tutorial
+                                tutorial.draw(cv2, frame_bgr, tracker)
+                            cv2.imshow(win, frame_bgr)
+                        if cv2.waitKey(33) & 0xFF in (27, ord("q")):
+                            print("\npreview closed")
+                            break
+                    else:
+                        time.sleep(0.2)
+                    if time.monotonic() > sig_assert_at:
+                        # camera/mediapipe startup clobbers SIGUSR1 to SIG_IGN at
+                        # the C level (see the signal block above): take it back.
+                        assert_signal_handlers()
+                        sig_assert_at = time.monotonic() + 2.0
+                    if time.monotonic() > warned_at:
+                        warn_if_stuck()
+                        warned_at = time.monotonic() + 8.0
+                    stats = getattr(source, "stats", None)
+                    # Legacy only (2026-11-15): "cursor will lag" is false in a
+                    # mode with no cursor, and it repeated every 5 s in the log.
+                    if (args.legacy and stats and stats["fps"]
+                            and not stats["realtime"]
+                            and time.monotonic() > lag_warned_at):
+                        print(f"  tracking below realtime (detect "
+                              f"{stats['detect_ms']:.0f}ms > frame budget at "
+                              f"{stats['fps']:.0f}fps) — cursor will lag",
                               file=sys.stderr)
-                if blind_at is not None and time.monotonic() > blind_at:
-                    blind_at = None                 # once is the whole point
-                    if source.frames == 0:
-                        print(
-                            "\n  CAMERA DELIVERED NO FRAMES IN 5s — this is a "
-                            "denied Camera permission, not a tracking problem.\n"
-                            "  System Settings > Privacy & Security > Camera "
-                            "must list the app that STARTED this session:\n"
-                            "    menu bar switch -> 'Leap Menubar'   |   "
-                            "CLI run -> your terminal app\n"
-                            "  Grant it, then turn the session off and on "
-                            "again.\n", file=sys.stderr)
-            else:
-                print(f"\nauto-stopped after {args.duration:.0f}s")
-        except KeyboardInterrupt:
-            print("\nstopped")
-        finally:
-            # Never exit holding a button — that would strand the mouse down and
-            # leave the machine selecting everything the user touches.
-            engine.on_snapshot(Snapshot())
-            if shortcuts is not None:
-                # Never exit holding Option — a stuck system-wide modifier
-                # breaks typing everywhere, not just here.
-                shortcuts.release_dictation()
-            if screen_overlay is not None:
-                screen_overlay.close()
-            if guard:
-                guard.stop()
-            if cv2 is not None:
-                cv2.destroyAllWindows()
-                cv2.waitKey(1)          # let Cocoa actually close the window
+                        lag_warned_at = time.monotonic() + 5.0
+                    release, stall_warn = stall_watch.update(source.frames,
+                                                             time.monotonic())
+                    if release:
+                        # Idempotent: Schmitt.force_off emits nothing when nothing
+                        # is held, and the same call runs in the finally below.
+                        engine.on_snapshot(Snapshot())
+                        # The legacy fist DRAG is pressed through the command
+                        # layer, which the empty snapshot never reaches.
+                        direct.release()
+                        if stall_warn:
+                            print("  frame stream stalled — released held input",
+                                  file=sys.stderr)
+                    if blind_at is not None and time.monotonic() > blind_at:
+                        blind_at = None                 # once is the whole point
+                        if source.frames == 0 and needs_ffmpeg:
+                            print(
+                                f"\n  CAMERA DELIVERED NO FRAMES IN 5s — {label} "
+                                "is read through ffmpeg, and ffmpeg is not "
+                                "installed.\n"
+                                "  Install it (brew install ffmpeg), or pick "
+                                "another camera with --camera-name.\n",
+                                file=sys.stderr)
+                        elif source.frames == 0:
+                            print(
+                                "\n  CAMERA DELIVERED NO FRAMES IN 5s — this is a "
+                                "denied Camera permission, not a tracking problem.\n"
+                                "  System Settings > Privacy & Security > Camera "
+                                "must list the app that STARTED this session:\n"
+                                "    menu bar switch -> 'Leap Menubar'   |   "
+                                "CLI run -> your terminal app\n"
+                                "  Grant it, then turn the session off and on "
+                                "again.\n", file=sys.stderr)
+                else:
+                    print(f"\nauto-stopped after {args.duration:.0f}s")
+            except KeyboardInterrupt:
+                print("\nstopped")
+            finally:
+                if shortcuts is not None:
+                    shortcuts.close()
+    finally:
+        # Never exit holding a button — that would strand the mouse down and
+        # leave the machine selecting everything the user touches.
+        engine.on_snapshot(Snapshot())
+        direct.release()            # the legacy fist DRAG, see the stall path
+        if shortcuts is not None:
+            # Never exit holding Option — a stuck system-wide modifier
+            # breaks typing everywhere, not just here.
+            shortcuts.release_dictation()
+        if screen_overlay is not None:
+            screen_overlay.close()
+        if cv2 is not None:
+            cv2.destroyAllWindows()
+            cv2.waitKey(1)          # let Cocoa actually close the window
+        if guard:
+            guard.stop()
     print(f"{source.frames} frames")
     return 0
 

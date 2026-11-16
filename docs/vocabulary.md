@@ -80,7 +80,7 @@ hand out of frame the way cut-style swipes did:
 |---|---|---|
 | frame a rectangle with both hands (thumb+index L-shapes) | ~0.8s | **FRAME SHOT** — screenshot of the framed region to the clipboard (`--pane window/tab`) |
 | OK sign (pinch, 3 fingers up) | ~0.6s | Mission Control |
-| ILY sign (thumb+index+pinky) | ~1.5s | pause / resume all gesture control (fires on ring-fill, with a chime) |
+| ILY sign (thumb+index+pinky) | ~1.2s | pause / resume all gesture control (fires on ring-fill, with a chime) |
 | thumbs-up | ~0.4s | **DICTATE** toggle — mic ON (Tink), thumbs-up again = OFF (Pop). Holds the Option key in between; rebind your dictation app (Willow Voice etc.) to a bare Option hold. Your hand is free while dictating. ILY pause also closes the mic; a 3-minute watchdog is the backstop |
 
 While you hold the frame pose, the framed region is highlighted on the actual

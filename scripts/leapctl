@@ -7,7 +7,7 @@
 #   leapctl status             running or not
 #   leapctl log [n]            tail the session log
 #
-# While running, the ILY pose (thumb+index+pinky, held 1s) pauses/resumes all
+# While running, the ILY pose (thumb+index+pinky, held ~1.2s) pauses/resumes all
 # gesture control in-band — use that for quick toggling; `off` for actually
 # stopping. Dry-run practice room: `leapctl on --backend dry-run --preview`.
 
@@ -19,7 +19,35 @@ LOG_FILE="$RUN_DIR/leapinput.log"
 PAUSED_FILE="$RUN_DIR/paused"   # touched/removed by the session on every toggle
 BIN="$ROOT/.venv/bin/leapinput"
 
-alive() { [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; }
+LOG_MAX_BYTES=$((10 * 1024 * 1024))
+
+# The PID file is only removed by `off`, so a session that died on its own
+# leaves it behind, and macOS reuses PIDs. `kill -0` alone then reported an
+# unrelated app as "running", and off/pause signalled it — SIGUSR1 ends most
+# processes (2026-11-15). So a PID counts only if its argv is this tool's
+# session; anything else is stale and the file goes.
+is_session() { ps -o command= -p "$1" 2>/dev/null | grep -q 'bin/leapinput --'; }
+alive() {
+  [ -f "$PID_FILE" ] || return 1
+  local pid
+  pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+  if [ -n "$pid" ] && is_session "$pid"; then
+    return 0
+  fi
+  rm -f "$PID_FILE"
+  return 1
+}
+
+# One previous log is kept as .1. Only this session log rotates: the
+# telemetry click logs are the evidence the thresholds are fitted from.
+rotate_log() {
+  [ -f "$LOG_FILE" ] || return 0
+  local size
+  size="$(wc -c <"$LOG_FILE" | tr -d ' ')"
+  if [ "${size:-0}" -gt "$LOG_MAX_BYTES" ]; then
+    mv -f "$LOG_FILE" "$LOG_FILE.1"
+  fi
+}
 
 case "${1:-status}" in
   on)
@@ -39,6 +67,7 @@ case "${1:-status}" in
     fi
     mkdir -p "$RUN_DIR"
     rm -f "$PAUSED_FILE"        # a crash can strand the flag; fresh start = unpaused
+    rotate_log
     # The built-in camera is the default source; a caller that names its own
     # (`leapctl on --source phone`) replaces it rather than appending a second
     # --source, so the argv stays readable — the menu bar identifies the live
@@ -60,7 +89,7 @@ case "${1:-status}" in
     echo $! >"$PID_FILE"
     disown
     echo "leapinput ON (pid $(cat "$PID_FILE")) — log: $LOG_FILE"
-    echo "  quick pause/resume without stopping: hold the ILY pose ~1.5s"
+    echo "  quick pause/resume without stopping: hold the ILY pose ~1.2s"
     echo "  stop for real: $(basename "$0") off"
     ;;
   off)

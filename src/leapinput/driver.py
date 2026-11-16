@@ -580,6 +580,13 @@ class DirectDriver:
         self._touch_offset = None
         self._press(False)
 
+    def release(self) -> None:
+        """Let go of the button whoever pressed it. The empty-Snapshot release
+        only reaches the gesture engine's buttons; the free-hand fist DRAG
+        (legacy) is pressed through on_command, so the CLI's stall and exit
+        releases call this too (2026-11-15). A no-op when nothing is held."""
+        self._up()
+
     def _on_scroll(self, event: IntentEvent) -> None:
         self.backend.scroll(event.data.get("dy", 0.0) * self.map.scroll_gain)
 
@@ -618,8 +625,28 @@ class ShortcutDriver:
         # tracks dictation state (the CLI's snapshot gate) can re-sync instead
         # of silently inverting its next toggle. Wired by cli.py.
         self.on_forced_release: Optional[Callable[[], None]] = None
+        # Told before Option is pressed (True) and after it is released
+        # (False), so the out-of-process guard knows whether a SIGKILL left it
+        # held (2026-11-15). Wired by cli.py to Guard.option; it must not
+        # raise, and is called under _dict_lock so the guard sees the edges
+        # in the order they were posted.
+        self.on_option: Optional[Callable[[bool], None]] = None
+        # Set by close() at shutdown. Once set, nothing presses a key: the
+        # capture thread can still deliver a frame while the session stops,
+        # and a thumbs-up there used to re-press Option AFTER the exit
+        # release had run, leaving it held when the process ended.
+        self._closed = False
+
+    def close(self) -> None:
+        """Refuse every later press, then release Option if it is held.
+        Idempotent; release_dictation() still works afterwards."""
+        with self._dict_lock:
+            self._closed = True
+        self.release_dictation()
 
     def on_command(self, event) -> None:
+        if self._closed:
+            return                          # shutting down: press nothing
         name = event.command.value
         if name == "pane.new":
             self._new_pane(event.data.get("rect"))
@@ -650,17 +677,33 @@ class ShortcutDriver:
         with self._dict_lock:
             if active == self._dictating:
                 return False                # idempotent on both edges
+            if active and self._closed:
+                return False                # after close(), never press
             self._dictating = active
             if self._dict_timer is not None:
                 self._dict_timer.cancel()
                 self._dict_timer = None
+            if active:
+                # Guard first, then press: a kill between the two leaves the
+                # guard releasing an Option that is up, which is harmless.
+                self._tell_guard(True)
             self.backend.key_hold(self.KEY_OPTION, active, alt=True)
+            if not active:
+                self._tell_guard(False)
             if active:
                 self._dict_timer = threading.Timer(
                     self.MAX_DICTATION_S, self._dictation_watchdog)
                 self._dict_timer.daemon = True
                 self._dict_timer.start()
             return True
+
+    def _tell_guard(self, held: bool) -> None:
+        if self.on_option is None:
+            return
+        try:
+            self.on_option(held)
+        except Exception as exc:            # never into the gesture path
+            print(f"[command] guard notify failed: {exc}", file=sys.stderr)
 
     def _collect_transcript(self) -> None:
         """Dictation just ended — hand what was said to the open grab.

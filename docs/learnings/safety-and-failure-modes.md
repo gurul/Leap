@@ -17,7 +17,10 @@ of the machine you need in order to fix it.
 **An out-of-process guard.** The parent holds one end of a pipe; a separate
 guard process blocks on the other. Any parent exit — clean, crashed, or
 `SIGKILL`, which no `finally:` and no `atexit` survives — closes the pipe, the
-read returns EOF, and the guard posts button-up for left, right and centre.
+read returns EOF, and the guard posts button-up for left, right and centre —
+and, since 2026-11-15, the Option key-up when Option is held. The parent writes
+one byte to the pipe before it presses Option and one after it releases it; a
+byte the guard cannot read makes it release Option anyway.
 It depends on the OS reclaiming a file descriptor, not on the parent
 successfully running any code, and it runs in its own process group so a
 Ctrl-C aimed at the parent cannot kill it first. **Verified against a real
@@ -51,6 +54,8 @@ Wired one by one in the 2026-08-19 hardening pass
 | single empty Leap tracking event | bridged by the camera's 150 ms blip logic — no button release |
 | pause | feeds an empty Snapshot and releases everything, **deliberately** |
 | dictation left open | force-released after `MAX_DICTATION_S = 180 s`, and the forced release resyncs `CommandEngine` so the chime vocabulary cannot invert |
+| shutdown | `ShortcutDriver.close()` refuses every later press, the capture thread stops, then the final releases run and the guard stops last (2026-11-15) |
+| SIGKILL with the mic open | the guard posts the Option key-up (2026-11-15) |
 
 The capture thread is the **only** caller of `on_snapshot`, which is why the
 stall watchdogs exist at all: a stalled stream never delivers the empty

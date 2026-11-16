@@ -55,7 +55,20 @@ class DepthFrame:
         """Inflated u16 depth map as a depth_h x depth_w list of rows.
         0 = invalid. Kept dependency-free; phase 2 will go straight to
         numpy for the per-landmark sampling."""
-        raw = zlib.decompress(self.depth_deflate, -15)
+        # Capped (2026-11-15): the stream is unauthenticated plain TCP, so the
+        # DEFLATE payload is untrusted. Inflate at most the bytes the header
+        # promises; anything beyond is a decompression bomb or corruption.
+        want = 2 * self.depth_w * self.depth_h
+        if want == 0:
+            return []           # and max_length=0 would mean "no limit"
+        try:
+            d = zlib.decompressobj(-15)
+            raw = d.decompress(self.depth_deflate, want)
+        except zlib.error as e:
+            raise ValueError(f"depth payload is not raw DEFLATE: {e}") from e
+        if d.unconsumed_tail or len(raw) != want:
+            raise ValueError(f"depth payload inflates to the wrong size for "
+                             f"{self.depth_w}x{self.depth_h}")
         it = struct.iter_unpack("<H", raw)
         flat = [v for (v,) in it]
         return [flat[r * self.depth_w:(r + 1) * self.depth_w]
@@ -141,10 +154,15 @@ def encode_imu(sample: ImuSample) -> bytes:
 
 
 def _center_depth_mm(frame: DepthFrame) -> Optional[int]:
-    rows = frame.depth_mm()
-    if not rows:
+    """None for an empty or undecodable depth map: one bad frame must not end
+    the receiver."""
+    try:
+        rows = frame.depth_mm()
+        if not rows:
+            return None
+        v = rows[frame.depth_h // 2][frame.depth_w // 2]
+    except (ValueError, IndexError):
         return None
-    v = rows[frame.depth_h // 2][frame.depth_w // 2]
     return v or None
 
 

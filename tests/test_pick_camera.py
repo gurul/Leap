@@ -1,7 +1,11 @@
 from leapinput import camera
 
 
-def _with(monkeypatch, names):
+def _with(monkeypatch, names, ffmpeg="/opt/homebrew/bin/ffmpeg"):
+    # pick_camera_index skips an OBSBOT when ffmpeg is missing (2026-11-15),
+    # so pin ffmpeg's presence rather than inherit this machine's.
+    from leapinput import ffmpegcam
+    monkeypatch.setattr(ffmpegcam, "ffmpeg_path", lambda: ffmpeg)
     monkeypatch.setattr(camera, "camera_names", lambda: names)
     return camera.pick_camera_index()
 

@@ -17,6 +17,9 @@ Security posture: a LAN convenience server. TLS is a self-signed cert (Safari
 demands a secure context for getUserMedia; expect the one-time "not private"
 warning). The random URL token is the only auth — enough to keep a roommate's
 browser from streaming THEIR camera into your cursor, not more than that.
+Since 2026-11-15 the token is 128 bits and new every session (decisions.md
+always called it per-session; the code had saved a 32-bit one for good), and
+a second offer cannot replace a stream that is still connected.
 """
 
 from __future__ import annotations
@@ -220,15 +223,15 @@ def lan_ip() -> str:
         s.close()
 
 
-def _ensure_token() -> str:
-    """Random URL path segment, persisted so the phone bookmark keeps working."""
-    STATE_DIR.mkdir(exist_ok=True)
-    path = STATE_DIR / "phonecam-token"
-    if path.exists():
-        return path.read_text().strip()
-    token = secrets.token_urlsafe(4)
-    path.write_text(token)
-    return token
+def _session_token() -> str:
+    """Random URL path segment, new every session and never written to disk.
+
+    It is the only auth on a 0.0.0.0 server whose video becomes clicks and
+    keys under --legacy. The old 6-character token (32 bits) was saved for
+    good so a phone bookmark kept working; a bookmark is not worth that.
+    128 bits, per the per-session token in decisions.md (2026-08-20).
+    """
+    return secrets.token_urlsafe(16)
 
 
 def _ensure_cert() -> tuple[Path, Path]:
@@ -288,7 +291,7 @@ class _PhoneCamServer:
 
     def __init__(self, port: int = DEFAULT_PORT):
         self.port = port
-        self.token = _ensure_token()
+        self.token = _session_token()
         self.url = f"https://{lan_ip()}:{port}/{self.token}"
         self.cond = threading.Condition()
         self.frame = None                  # BGR ndarray, newest wins
@@ -373,8 +376,15 @@ class _PhoneCamServer:
         sdp = re.sub(r"^a=extmap:\d+ [^\r\n]*abs-send-time[^\r\n]*\r?\n", "",
                      params["sdp"], flags=re.M)
         sdp = re.sub(r"^a=rtcp-fb:\d+ goog-remb\r?\n", "", sdp, flags=re.M)
-        if self._pc is not None:           # page reloaded: newest phone wins
-            await self._pc.close()
+        if self._pc is not None:
+            if self._pc.connectionState == "connected":
+                # A live stream is never replaced by a second offer: anyone
+                # on the LAN who learns the URL could otherwise cut the
+                # user's phone off and stream their own hand poses in. A
+                # reloaded page waits for the old peer to drop.
+                return web.Response(status=409,
+                                    text="a phone is already connected")
+            await self._pc.close()          # dropped peer: the newest wins
         pc = self._pc = RTCPeerConnection()
 
         @pc.on("track")

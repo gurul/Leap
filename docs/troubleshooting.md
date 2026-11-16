@@ -134,8 +134,14 @@ would use to fix it.
   control.
 - **An out-of-process guard.** The parent holds one end of a pipe; the guard
   blocks on the other. Any parent exit — clean, crashed, or `SIGKILL`, which
-  no `finally:` survives — closes the pipe and the guard posts button-up.
-  This is the only failure class an in-process handler cannot cover.
+  no `finally:` survives — closes the pipe and the guard posts button-up,
+  plus the Option key-up when the parent last said Option was held (the mic).
+  This is the only failure class an in-process handler cannot cover. The
+  session log says `guard: ready` at start, or `guard: NOT READY` when the
+  net is missing.
+- **One session at a time.** A second `--backend quartz` session exits with
+  code 2 instead of firing every gesture twice (a lock in `~/.leapinput`
+  that the kernel drops on any exit).
 - **A deadline.** Every run auto-stops after 120s (`--duration 0` to
   disable). A runaway that owns the cursor is genuinely hard to quit by hand.
 - **Fail-safe engagement.** Losing tracking releases everything held and

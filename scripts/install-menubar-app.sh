@@ -23,6 +23,13 @@ APP="${LEAPINPUT_APP:-$HOME/Applications/Leap Menubar.app}"
 ID="world.era.leapinput.menubar"
 
 [ -x "$BIN" ] || { echo "missing $BIN — run scripts/setup.sh first" >&2; exit 1; }
+# Without rumps the app builds, launches, and dies at `import rumps` with the
+# traceback only in ~/.leapinput/menubar.log — no icon, no error on screen.
+"$ROOT/.venv/bin/python" -c 'import rumps' 2>/dev/null || {
+  echo "rumps is not installed in $ROOT/.venv — the menu bar app would crash on launch." >&2
+  echo "  install it:  VIRTUAL_ENV=\"$ROOT/.venv\" uv pip install -e '.[menubar]'" >&2
+  exit 1
+}
 
 mkdir -p "$APP/Contents/MacOS"
 

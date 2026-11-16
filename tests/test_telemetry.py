@@ -125,8 +125,10 @@ def test_server_serves_page_state_and_mark(tmp_path):
         state = json.loads(urllib.request.urlopen(f"{url}/state",
                                                   timeout=5).read())
         assert state["clicks"] == 1 and state["pinch_on_mm"] == 40.0
+        # The dashboard's own fetch sends X-Leap: 1; /mark refuses a POST
+        # without it (2026-11-15, cross-site writes into the click log).
         req = urllib.request.Request(f"{url}/mark", data=b"phantom",
-                                     method="POST")
+                                     method="POST", headers={"X-Leap": "1"})
         marked = json.loads(urllib.request.urlopen(req, timeout=5).read())
         assert marked["marked"] == 1
     finally:

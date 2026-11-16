@@ -30,7 +30,8 @@ shuffle AVFoundation's device order, and their feeds are black unless their
 app is streaming. `--list-cameras` shows what's attached; `--camera-name
 iphone` targets Continuity Camera (or any camera by substring), `--camera N`
 forces a raw index. With no flag, an attached OBSBOT wins, then the
-built-in camera.
+built-in camera — unless ffmpeg is missing, in which case the OBSBOT is
+skipped (it cannot deliver a frame without it) and the log says so.
 
 The OBSBOT Tiny 3 opens under OpenCV and then delivers no frames in any mode,
 so `leapinput.ffmpegcam` reads it through ffmpeg (`brew install ffmpeg`) at
@@ -53,8 +54,10 @@ VIRTUAL_ENV=$PWD/.venv uv pip install -e '.[phone]'
 
 Open the printed URL on the phone, accept the self-signed-certificate warning
 once, tap **Start (rear)** or **Start (front)**. The random URL token is
-persisted (`~/.leapinput/phonecam-token`) so the phone bookmark keeps
-working; media never leaves your network (no STUN/TURN).
+128 bits and new every session (2026-11-15; it used to be a saved 32-bit
+token), so a bookmark from an earlier session no longer works — open the
+printed URL. While one phone is connected, a second offer gets 409 instead of
+replacing it. Media never leaves your network (no STUN/TURN).
 
 From the menu bar, **Use phone camera (starts server)** does the same thing
 without a terminal: it stops a webcam session if one is running, starts the

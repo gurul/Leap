@@ -14,6 +14,187 @@ would make us reverse it.
 
 ---
 
+## 2026-11-15 — the guard releases Option, and the parent tells it when
+
+**What.** The parent writes one byte to the guard pipe before it presses
+Option (`O`) and one after it releases it (`o`). At end of input the guard
+still releases all three mouse buttons, and now also posts the Option key-up
+(HID source, flags 0) when Option is held. A byte it cannot read, or a read
+error, makes it release Option anyway. The guard writes `R` when it can post;
+the parent waits up to 5 s for it and logs `guard: ready` or `guard: NOT
+READY`. A failed pipe write is logged and never raised into the gesture path.
+The guard is spawned with `python -P`, so the working directory is not first
+on `sys.path`.
+
+**Why.** A review of 998e00e: the shipped tool's only held input is Option
+(the mic), and the guard posted mouse-ups only. A SIGKILL mid-dictation left
+Option down system-wide.
+
+**Evidence.** `guard.py:30-46` at 998e00e had no key event; `driver.py:657`
+held Option for up to 180 s. Pinned by the `test_j1_*` tests in
+`tests/test_judge_regressions.py`. Not measured on the metal: a real
+`kill -9` with the mic open.
+
+**Restore.** Drop the `on_option` wiring in `cli.py` and pass `option=False`
+in `guard.main()`. **Reverse it if** the shipped tool stops holding a
+modifier.
+
+---
+
+## 2026-11-15 — shutdown: no press after close, releases after the capture thread stops
+
+**What.** `ShortcutDriver.close()` sets a flag under `_dict_lock`; after it,
+no command presses a key. `cli.main()` now closes the shortcut driver first,
+leaves `source.open()` (the capture thread stops), then runs the final
+releases, and stops the guard last.
+
+**Why.** The final releases ran while the capture thread still delivered
+frames, so a thumbs-up during auto-stop or `leapctl off` pressed Option again
+after it had been released.
+
+**Evidence.** The review's dry-run probe showed `key_hold(58, True)` after the
+exit release. Pinned by `test_j2_*`, including a `cli.main()` run that stops
+on SIGTERM.
+
+**Restore.** Move the release block back inside the `with`. **Reverse it if**
+a source's close can hang for long enough to matter; the guard still covers
+process exit.
+
+---
+
+## 2026-11-15 — the stall and exit releases also drop the legacy fist-drag button
+
+**What.** `DirectDriver.release()` runs on the CLI's stall release and at
+exit, next to the empty snapshot.
+
+**Why.** Under `--legacy` the free-hand fist DRAG presses through
+`CommandEngine`, which the empty snapshot never reaches. A stalled stream
+left the button held.
+
+**Evidence.** The review's probe: after the stall release, the driver still
+believed the button was held. Pinned by `test_j3_*`.
+
+**Restore.** Remove the two `direct.release()` calls. **Reverse it if**
+never: it is a no-op when nothing is held.
+
+---
+
+## 2026-11-15 — one quartz session at a time
+
+**What.** A `--backend quartz` session takes an advisory `flock` on
+`~/.leapinput/session.lock` (`LEAPINPUT_RUN_DIR` or `LEAPINPUT_LOCK_FILE`
+override it) before it builds the backend. A second one prints the reason and
+exits with code 2. Dry-run takes no lock.
+
+**Why.** Two sessions fired every gesture twice, and `leapctl pause` reached
+only one. The kernel drops a `flock` on any exit, so a crash cannot leave a
+stale lock.
+
+**Evidence.** Pinned by `test_j5_*`. **Restore.** Remove the lock block in
+`cli.main()`. **Reverse it if** two real sessions are ever wanted at once.
+
+---
+
+## 2026-11-15 — `leapctl` checks the PID is a session, and rotates its log
+
+**What.** `alive()` counts a PID only when its argv contains
+`bin/leapinput --`; otherwise the PID file is stale and is removed. `leapctl
+on` moves `leapinput.log` to `leapinput.log.1` when it is over 10 MB.
+Telemetry files are never pruned: they are the evidence thresholds are fitted
+from.
+
+**Why.** A reused PID made `off` and `pause` signal an unrelated app (SIGUSR1
+ends most processes). The log grew without limit.
+
+**Evidence.** Checked with `bash -n` only; the script was not run against
+real state. **Restore.** `alive() { [ -f "$PID_FILE" ] && kill -0 "$(cat
+"$PID_FILE")" 2>/dev/null; }` and drop `rotate_log`. **Reverse it if** the
+session is ever started under a different argv.
+
+---
+
+## 2026-11-15 — the legacy phone source: 128-bit per-session token, no stream takeover
+
+**What.** The phone URL token is `secrets.token_urlsafe(16)`, new every
+session and not written to disk. A second offer while a peer is connected
+gets 409. `phonedepth` inflates at most `2*w*h` bytes and turns decode errors
+into "no reading" instead of ending the receiver.
+
+**Why.** The token was 6 characters, saved for good, on a `0.0.0.0` server
+whose video becomes clicks and keys under `--legacy`, and a new offer closed
+the user's stream. The 2026-08-20 phone entry below already called the token
+per-session; the saved token was a code comment ("so the phone bookmark keeps
+working"), not a recorded decision.
+
+**Evidence.** Pinned by `test_j7_*`. **Restore.** `_ensure_token()` from
+998e00e. **Reverse it if** a bookmark matters more than the LAN threat; then
+keep it 128-bit.
+
+---
+
+## 2026-11-15 — cameras that need ffmpeg are skipped without it
+
+**What.** `pick_camera_index()` skips a camera that `wants_ffmpeg()` when
+`ffmpeg_path()` is None and falls back to the next known camera. When a
+named ffmpeg camera delivers no frames, the 5 s message names ffmpeg instead
+of the Camera permission.
+
+**Why.** With an OBSBOT and no ffmpeg, the CLI opened a camera it knew was
+dead and then blamed the permission. **Evidence.** `ffmpegcam.py:3-5`
+measured 0 frames from OpenCV. Pinned by `test_j11_*`. **Restore.** Remove
+the skip. **Reverse it if** OpenCV learns to read the OBSBOT.
+
+---
+
+## 2026-11-15 — "cursor will lag" only under `--legacy`
+
+**What.** The below-realtime warning prints only in legacy mode.
+**Why.** The default tool has no cursor, and the line repeated every 5 s.
+**Evidence.** Pinned by `test_j12_*`. The ffmpeg duplicate-frame question
+behind it (review report a) is NOT addressed: `ffmpegcam.py` is unchanged,
+because an `-fps_mode` change is unmeasured on the hardware.
+**Restore.** Drop `args.legacy and` from the condition.
+
+---
+
+## 2026-11-15 — the dashboard checks Host, needs a header to write, caps the body
+
+**What.** The telemetry server answers 403 unless `Host` is
+`127.0.0.1:<port>` or `localhost:<port>`. `POST /mark` needs `X-Leap: 1`
+(the dashboard's own fetch sends it) and refuses a body over 4096 bytes with
+413.
+
+**Why.** Binding to 127.0.0.1 keeps out other machines, not other web pages:
+DNS rebinding could read `/state`, and a cross-site POST could write into the
+click log. **Evidence.** Pinned by `test_j14_*`. **Restore.** Remove
+`_host_ok` and the header check. **Reverse it if** the dashboard must be
+reached by another name (then add that name, do not drop the check).
+
+---
+
+## 2026-11-15 — the guard sink, the `dev` extra and CI
+
+**What.** With `LEAPINPUT_GUARD_SINK=<file>` set, the guard appends one line
+per release (`release left` … `release option`) and posts nothing. The guard
+tests assert on those lines. `dev` now installs `numpy`, `aiortc` and
+`aiohttp`, and
+`.github/workflows/test.yml` runs the suite on `macos-14` with the sink set.
+`menubar` is in the README install line, and `install-menubar-app.sh` stops
+when `rumps` cannot be imported.
+
+**Why.** The guard tests posted real mouse-ups and passed even when the
+release could not run. A fresh clone with `dev` stopped at collection. The
+README install path built a menu bar app that crashed on launch.
+
+**Evidence.** `tests/test_judge_regressions.py`. `uv.lock` was NOT
+regenerated: `uv lock` with the local uv rewrote the lock format revision
+5 → 3, so it was left as committed and does not list the new `dev` entries.
+
+**Restore.** `dev = ["pytest"]`. **Reverse it if** never for the sink: a
+test suite must not post input.
+
+---
+
 ## 2026-08-21 — the cursor picks the screen
 
 **What.** Every screen-shaped decision now resolves against the display the

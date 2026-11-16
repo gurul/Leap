@@ -303,6 +303,18 @@ class Telemetry:
             pass
 
 
+# Hardening (2026-11-15). Binding to 127.0.0.1 keeps other machines out, not
+# other web pages: a page in the user's browser can still reach this port.
+#   - Host must name this server, or DNS rebinding reads /state (the log
+#     path, so the username, plus live hand activity).
+#   - POST /mark needs a custom header. A cross-site form or a "simple"
+#     fetch cannot set one without a CORS preflight, which this server never
+#     answers, so other pages cannot write into the click log.
+#   - The body is capped: a note is one line, not an upload.
+MARK_HEADER = "X-Leap"
+MAX_BODY = 4096
+
+
 class TelemetryServer:
     """Serves the dashboard on 127.0.0.1. `start()` returns the URL or None."""
 
@@ -313,6 +325,7 @@ class TelemetryServer:
 
     def start(self) -> Optional[str]:
         tele = self.telemetry
+        server = self
 
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, *a):      # noqa: N802 - stdlib name
@@ -326,7 +339,17 @@ class TelemetryServer:
                 self.end_headers()
                 self.wfile.write(data)
 
+            def _host_ok(self) -> bool:
+                host = (self.headers.get("Host") or "").strip().lower()
+                ok = host in (f"127.0.0.1:{server.port}",
+                              f"localhost:{server.port}")
+                if not ok:
+                    self._send(403, "forbidden host", "text/plain")
+                return ok
+
             def do_GET(self):               # noqa: N802 - stdlib name
+                if not self._host_ok():
+                    return
                 if self.path == "/":
                     self._send(200, _PAGE)
                 elif self.path == "/bench":
@@ -357,8 +380,22 @@ class TelemetryServer:
                     self._send(404, "not found", "text/plain")
 
             def do_POST(self):              # noqa: N802 - stdlib name
+                if not self._host_ok():
+                    return
                 if self.path == "/mark":
-                    n = int(self.headers.get("Content-Length") or 0)
+                    if self.headers.get(MARK_HEADER) != "1":
+                        self._send(403, f"missing {MARK_HEADER} header",
+                                   "text/plain")
+                        return
+                    try:
+                        n = int(self.headers.get("Content-Length") or 0)
+                    except ValueError:
+                        self._send(400, "bad Content-Length", "text/plain")
+                        return
+                    if n < 0 or n > MAX_BODY:
+                        self.close_connection = True
+                        self._send(413, "body too large", "text/plain")
+                        return
                     note = self.rfile.read(n).decode(errors="replace") if n \
                         else ""
                     cid = tele.mark_phantom(note)
@@ -476,7 +513,7 @@ function draw(){
   e2.stroke();
   requestAnimationFrame(draw);
 }
-function mark(){fetch("/mark",{method:"POST"});}
+function mark(){fetch("/mark",{method:"POST",headers:{"X-Leap":"1"}});}
 $("phantom").onclick=mark;
 addEventListener("keydown",e=>{if(e.key==="p"||e.key==="P")mark();});
 fetch("/state").then(r=>r.json()).then(st=>{
