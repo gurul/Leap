@@ -178,7 +178,7 @@ reached by another name (then add that name, do not drop the check).
 per release (`release left` … `release option`) and posts nothing. The guard
 tests assert on those lines. `dev` now installs `numpy`, `aiortc` and
 `aiohttp`, and
-`.github/workflows/test.yml` runs the suite on `macos-14` with the sink set.
+`.github/workflows/test.yml` runs the suite on `macos-latest` with the sink set.
 `menubar` is in the README install line, and `install-menubar-app.sh` stops
 when `rumps` cannot be imported.
 
