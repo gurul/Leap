@@ -11,7 +11,7 @@ permissions:
 jobs:
   pytest:
     # macOS: the base dependencies are pyobjc, which only installs here.
-    runs-on: macos-14
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v10
